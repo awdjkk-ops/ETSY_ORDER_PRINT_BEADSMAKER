@@ -1,0 +1,31 @@
+{
+  "version": "0.8.0",
+  "notes": "· 차감 대기: Etsy 상품 코드와 카페24 상품 코드가 다르면 '⚠ 코드 다름' 경고, 확인 전까지 차감 안 함 (오른쪽 클릭 → 이대로 맞음). 연결표에 '코드 다름' 보기\n· 바탕화면 아이콘 만들기 (프린터 + Etsy E 아이콘, 검은 창 없이 실행)\n· 깃허브 자동 업데이트 (머리글 알림, 관리 탭에서 확인·이전 버전으로 되돌리기)\n· 연결 데이터 백업에 뽑음 기록·출력 기록·라벨 묶음 포함",
+  "packages": [],
+  "files": [
+    "1_install.bat",
+    "auto_print.bat",
+    "autoprint.py",
+    "backup.py",
+    "boot_check.bat",
+    "cafe24.py",
+    "etsy_app.py",
+    "etsy_labels.py",
+    "etsy_order.ico",
+    "gui_labels.py",
+    "gui_schedule.py",
+    "gui_scroll.py",
+    "gui_stock.py",
+    "make_shortcut.ps1",
+    "notify.py",
+    "orderprint.py",
+    "premap.py",
+    "print_schedule.py",
+    "stock.py",
+    "theme.py",
+    "updater.py",
+    "watch.py",
+    "바탕화면_아이콘_만들기.bat",
+    "업데이트방법.md"
+  ]
+}
