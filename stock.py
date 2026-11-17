@@ -761,25 +761,37 @@ def _code_sig(e, title=None):
     return f"{op.clean(title or e.get('etsy_title') or '')}|{e.get('product_no')}"
 
 
+_C24_CODE = re.compile(r"^\s*([A-Za-z]{1,8})[\s\-]?(\d+)")
+
+
+def _c24_code(text):
+    """카페24 상품명·자체코드 → 머리글자+번호까지만 ('PDT3330-8분음표' → 'PDT3330', 'CAP45-6mm' → 'CAP45')"""
+    m = _C24_CODE.match(str(text or ""))
+    return (m.group(1) + m.group(2)).upper() if m else ""
+
+
 def code_mismatch(e, title=None):
     """Etsy 상품 코드와 연결된 카페24 상품 코드가 다른지 → (Etsy 코드, 카페24 코드) 또는 None
-    머리글자 대응표·숫자 앞 0·끝 글자(OR·GD 등)는 무시하고 '머리글자+번호'로 비교.
+    카페24 코드는 '머리글자+번호'까지만 봄 (PDT3330-8 → PDT3330). 숫자 앞 0, Etsy 끝 글자(OR·GD 등)는 무시.
+    번호가 같고 머리글자가 같거나(대응표 적용 후) 카페24 머리글자가 Etsy 머리글자로 시작하면 맞음 (PL ↔ PLS, SI ↔ SIL).
     한쪽이라도 코드를 못 읽으면 비교 안 함. [이대로 맞음] 한 상품은 None (상품명·연결 상품이 바뀌면 다시 확인)"""
     if not e or not e.get("product_no"):
         return None
     t = title or e.get("etsy_title") or ""
     ec = C.extract_code(t)
-    cname = e.get("product_name") or ""
-    cc = C.extract_code(cname)
-    if not cc:
-        cust = C.norm_code(C.custom_map().get(int(e["product_no"]), "") if str(e["product_no"]).isdigit() else "")
-        cc = cust if _CODE_LIKE.match(cust or "") else ""
+    cc = _c24_code(e.get("product_name") or "")
+    if not cc and str(e["product_no"]).isdigit():
+        cc = _c24_code(C.custom_map().get(int(e["product_no"]), ""))
     if not ec or not cc:
         return None
-    want = core_code(zfix(apply_prefix(C.norm_code(ec))))
-    have = core_code(zfix(C.norm_code(cc)))
-    if not want or not have or want == have:
-        return None
+    raw = core_code(zfix(C.norm_code(ec)))                    # 대응표 적용 전
+    want = core_code(zfix(apply_prefix(C.norm_code(ec))))     # 대응표 적용 후
+    have = zfix(cc)
+    hp, hn = C.split_code(have)
+    for w in {want, raw}:
+        wp, wn = C.split_code(w)
+        if wn and wn == hn and wp and (hp == wp or hp.startswith(wp)):
+            return None
     ok = e.get("code_ok", [])
     if _code_sig(e, t) in ok or _code_sig(e) in ok:
         return None
