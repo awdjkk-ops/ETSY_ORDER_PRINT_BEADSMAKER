@@ -640,6 +640,10 @@ class StockTab(ttk.Frame):
             t = "연습 모드: 미리 보기 창의 [연습: 빼는 것처럼 해 보기]는 계산 결과만 보여 줍니다."
         else:
             t = "미리 보기 창의 [카페24에서 실제로 빼기]를 누르면 재고가 바뀝니다. 잘못 뺐으면 '차감 기록'에서 되돌릴 수 있습니다."
+        if op.load_settings().get("deduct_on_print"):
+            t += ("\n\n● 출력하면 바로 차감: 켜짐" + (" — 하지만 지금은 연습·테스트 모드라 바로 차감하지 않음"
+                                                  if self.practice.get() or op.is_test() else
+                                                  " (여기 남은 줄은 문제가 있었던 줄)"))
         self.go_hint.configure(text=t)
 
     @staticmethod
@@ -3004,6 +3008,33 @@ def build_admin_cards(parent, app, row_start, width=560):
     hint(pf, "켜면 '미 3조 6개'처럼 사입해야 할 개수까지, 끄면 상자 안에 '미'만 적습니다. "
              "(재고로 다 채울 수 없는 주문은 그 주문의 필요 수 전체가 '미' 개수입니다)",
          row=15, column=0, columnspan=3, sticky="w", pady=(4, 0), wrap=width)
+
+    # 출력하면 재고 바로 차감
+    dov = tk.BooleanVar(value=bool(op.load_settings().get("deduct_on_print")))
+
+    def save_do():
+        st = op.load_settings()
+        if dov.get() and not messagebox.askyesno(
+                "출력하면 재고 바로 차감", "켜면 주문서를 실제로 인쇄할 때마다(지금 출력·선택 출력·자동 출력) 그 주문의 재고를 "
+                                        "카페24에서 바로 뺍니다.\n\n· 문제없는 줄은 바로 차감 (차감 기록에서 되돌리기 가능)\n"
+                                        "· 재고가 모자란 품목은 0으로 맞추고 사입 목록 창을 띄움\n"
+                                        "· 연결 필요·코드 다름·바뀐 상품은 차감 대기에 남기고 알림\n\n"
+                                        "재고 탭의 연습 모드와 테스트 모드가 꺼져 있어야 동작합니다. 켤까요?"):
+            dov.set(False)
+            return
+        st["deduct_on_print"] = bool(dov.get())
+        op.save_settings(st)
+        try:
+            app.stock_tab._apply_texts()
+        except Exception:
+            pass
+        app.flash("출력하면 재고를 바로 차감합니다." if dov.get() else "출력해도 바로 차감하지 않습니다 (차감 대기에서 직접 뺌).")
+    ttk.Checkbutton(pf, text="주문서를 출력하면 재고를 바로 차감", variable=dov, command=save_do).grid(
+        row=16, column=0, columnspan=3, sticky="w", pady=(12, 0))
+    hint(pf, "켜면 인쇄가 끝난 직후 그 주문들을 바로 차감하고, 문제가 있을 때만 알립니다 (자동 출력은 오른쪽 아래 결과 창에). "
+             "재고 풀어둠 고정인데 재고가 기준보다 적은 품목은 이번만 빼지 않고 알립니다. "
+             "연습 모드·테스트 모드가 켜져 있으면 바로 차감하지 않습니다.",
+         row=17, column=0, columnspan=3, sticky="w", pady=(4, 0), wrap=width)
 
     # 자체 상품코드(업체명)
     vsv = tk.BooleanVar(value=bool(op.load_settings().get("vendor_show")))

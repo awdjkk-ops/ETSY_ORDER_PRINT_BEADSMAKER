@@ -15,6 +15,7 @@ import theme as T
 from gui_labels import LabelTab
 import gui_stock
 import autoprint as AP
+import autodeduct as AD
 import gui_schedule
 import print_schedule as sch
 import updater as UP
@@ -136,6 +137,9 @@ class App(tk.Tk):
         self.update_pill.configure(cursor="hand2")
         self.update_pill.bind("<Button-1>", lambda e: self.do_update())
         self.pending_update = None
+        self.short_pill = T.Pill(top, text=" ", bg="#FDEBEC", fg=T.RED)          # 자동 출력 뒤 사입 필요 알림
+        self.short_pill.configure(cursor="hand2")
+        self.short_pill.bind("<Button-1>", lambda e: self.show_auto_short())
         self.update_msg = "확인 전"
         self.conn_pill = T.pill(top, "Etsy 연결 확인 중")
         self.conn_pill.pack(side="right", padx=(8, 22))
@@ -220,6 +224,16 @@ class App(tk.Tk):
         self.update_test_ui()
         self.after(1500, self.refresh_auto)
         self.after(3000, self.check_update)              # 켜자마자 새 버전 확인 (깃허브)
+
+    def show_auto_short(self):
+        st = AP.load_status() or {}
+        items = (st.get("deduct") or {}).get("short") or []
+        if items:
+            t = str(st.get("started", ""))
+            gui_stock.ShortageWindow(self.stock_tab, items, False, when=f"{t[5:10]} {t[11:16]} 자동 출력분")
+        st["short_seen"] = True
+        op.write_json(AP.STATUS_PATH, st)
+        self.short_pill.pack_forget()
 
     # ================================================================ 프로그램 업데이트 (깃허브)
     def check_update(self, manual=False):
@@ -318,6 +332,13 @@ class App(tk.Tk):
                 self.result_pill.configure(text=txt, bg=T.CARD if nx else "#F1F1EF", fg=T.MUTED)
             if not self.result_pill.winfo_ismapped():
                 self.result_pill.pack(side="right", padx=4, after=self.conn_pill)
+            ded = st.get("deduct") or {}
+            if st.get("final") and ded.get("short") and not st.get("short_seen"):
+                self.short_pill.configure(text=f"⚠ 사입 필요 {len(ded['short'])}품목 (자동 출력)")
+                if not self.short_pill.winfo_ismapped():
+                    self.short_pill.pack(side="right", padx=4, after=self.result_pill)
+            elif self.short_pill.winfo_ismapped():
+                self.short_pill.pack_forget()
             upd = st.get("updated", "")
             if upd != self._auto_seen and st.get("final"):
                 self._auto_seen = upd
@@ -972,21 +993,43 @@ class App(tk.Tk):
                 def on_wait(label, sec, slow):
                     self.q.put(("wait", (label, sec, slow)))
                 done = AP.send(self.cfg, rs, path, sheets, kind, prog, on_wait)
+                ded = None
+                if done and AD.setting_on():                # 출력하면 재고 바로 차감 (관리 탭에서 켬)
+                    try:
+                        ded = AD.run([rs[i] for i in done], self.cfg, lambda p: self.q.put(("progress", (0, 0, p))))
+                    except Exception as e:
+                        op.log.exception("[바로 차감] 오류")
+                        ded = {"on": True, "err": f"재고 차감 중 오류: {str(e)[:150]} (줄은 차감 대기에 남음)"}
             finally:
                 lock.__exit__(None, None, None)
-            return len(done), sum(sheets)
+            return len(done), sum(sheets), ded
 
         def finished(res):
-            n, pages = res
+            n, pages, ded = res
             note = getattr(self, "_stock_note", "")
             if note:
                 self.flash(note)
             if op.is_test():
-                messagebox.showinfo("출력 완료 (테스트 모드)", f"{n}건 ({pages}장)을 인쇄하지 않고 PDF로 열었습니다.\n"
-                                                         "테스트 기록에 '뽑음'·라벨 묶음·재고 차감 대기가 저장되었습니다.")
+                msg = (f"{n}건 ({pages}장)을 인쇄하지 않고 PDF로 열었습니다.\n"
+                       "테스트 기록에 '뽑음'·라벨 묶음·재고 차감 대기가 저장되었습니다.")
+                title = "출력 완료 (테스트 모드)"
             else:
-                messagebox.showinfo("출력 완료", f"{n}건 ({pages}장)을 프린터로 보냈습니다.")
+                msg, title = f"{n}건 ({pages}장)을 프린터로 보냈습니다.", "출력 완료"
+            line = AD.summary_line(ded)
+            probs = AD.problems(ded) if ded else []
+            if line:
+                msg += f"\n\n{line}"
+            if probs:
+                messagebox.showwarning(title + " · 확인할 것 있음", msg + "\n\n⚠ " + "\n⚠ ".join(probs))
+            else:
+                messagebox.showinfo(title, msg)
             self.after_print()
+            try:
+                self.stock_tab.refresh()
+            except Exception:
+                pass
+            if ded and ded.get("short"):                   # 사입이 필요하면 사입 목록 창을 바로 띄움
+                gui_stock.ShortageWindow(self.stock_tab, ded["short"], False, when="방금 출력분")
         self.bg(work, finished, "주문서 준비 중...", progress=True)
 
     def after_print(self):

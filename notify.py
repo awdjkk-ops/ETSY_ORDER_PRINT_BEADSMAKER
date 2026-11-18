@@ -70,7 +70,7 @@ def close_previous():
 
 
 class Notice(tk.Tk):
-    W, H = 440, 260
+    W, H = 540, 260
 
     def __init__(self):
         super().__init__()
@@ -94,15 +94,21 @@ class Notice(tk.Tk):
         self.time_lb = tk.Label(head, text="", bg=T.CARD, fg=T.MUTED, font=T.f(9))
         self.time_lb.pack(side="right")
 
-        self.body = tk.Label(self, text="", bg=T.CARD, fg=T.INK, font=T.f(10), justify="left", anchor="w", wraplength=405)
+        self.body = tk.Label(self, text="", bg=T.CARD, fg=T.INK, font=T.f(10), justify="left", anchor="w", wraplength=505)
         self.body.pack(fill="x", padx=16)
         self.warn = tk.Label(self, text="", bg=T.CARD, fg=T.RED, font=T.f(10, True), justify="left", anchor="w",
-                             wraplength=405)
+                             wraplength=505)
         self.warn.pack(fill="x", padx=16)
-        self.pbar = ttk.Progressbar(self, length=405)
+        self.pbar = ttk.Progressbar(self, length=505)
         self.pbar.pack(padx=16, pady=(8, 2), anchor="w")
-        self.hint = tk.Label(self, text="", bg=T.CARD, fg=T.MUTED, font=T.f(9), justify="left", anchor="w", wraplength=405)
+        self.hint = tk.Label(self, text="", bg=T.CARD, fg=T.MUTED, font=T.f(9), justify="left", anchor="w", wraplength=505)
         self.hint.pack(fill="x", padx=16, pady=(4, 0))
+        self.ded_lb = tk.Label(self, text="", bg=T.CARD, fg=T.INK, font=T.f(10, True), justify="left", anchor="w",
+                               wraplength=505)                 # 재고 바로 차감 결과
+        self.ded_lb.pack(fill="x", padx=16, pady=(6, 0))
+        self.buy_txt = tk.Text(self, height=1, width=62, font=T.f(9), relief="flat", background="#FFF5F5",
+                               highlightthickness=0, wrap="none")
+        self.copy_full, self.copy_need = "", ""
         self.btns = tk.Frame(self, bg=T.CARD)
         self.btns.pack(side="bottom", fill="x", padx=16, pady=12)
         self.b_ok = ttk.Button(self.btns, text="확인", style="Accent.TButton", command=self.ok)
@@ -113,6 +119,8 @@ class Notice(tk.Tk):
         self.stopping = False
         self.b_open = ttk.Button(self.btns, text="프로그램 열기", command=self.open_manager)
         self.b_open.pack(side="left")
+        self.b_copy = ttk.Button(self.btns, text="사입 목록 복사", command=lambda: self._copy(self.copy_full))
+        self.b_copy2 = ttk.Button(self.btns, text="필요개수만", command=lambda: self._copy(self.copy_need))
         self.tick()
 
     # ------------------------------------------------------------
@@ -220,8 +228,39 @@ class Notice(tk.Tk):
             self.body.configure(text=str(st.get("message", ""))[:400])
             self.hint.configure(text="프로그램을 열어 확인한 뒤 출력 탭 → '지금 출력'으로 다시 뽑아 주세요.")
         self.warn.configure(text="⚠ " + "\n⚠ ".join(warn) if warn else "")
+        self._show_deduct(st.get("deduct") or {})
         self.update_idletasks()
         self.geometry(f"{self.W}x{max(self.H, self.winfo_reqheight())}")
+
+    def _show_deduct(self, d):
+        """재고 바로 차감 결과: 문제없으면 한 줄, 문제가 있으면 빨간 글씨 + 사입 목록과 복사 버튼"""
+        if not d or not d.get("on"):
+            return
+        probs = d.get("problems") or []
+        self.ded_lb.configure(text=(d.get("summary") or "") + ("" if probs else " ✓") +
+                              ("".join(f"\n⚠ {p}" for p in probs)), fg=T.RED if probs else T.GREEN)
+        if d.get("short_text"):
+            self.copy_full, self.copy_need = d["short_text"], d.get("short_need") or d["short_text"]
+            lines = d["short_text"].count("\n") + 1
+            self.buy_txt.configure(state="normal", height=min(6, lines))
+            self.buy_txt.delete("1.0", "end")
+            self.buy_txt.insert("1.0", d["short_text"])
+            self.buy_txt.configure(state="disabled")
+            self.buy_txt.pack(fill="x", padx=16, pady=(4, 0))
+            self.b_copy2.pack(side="right", padx=(0, 6))
+            self.b_copy.pack(side="right", padx=6)
+
+    def _copy(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        try:                                                # 복사했으면 프로그램 머리글의 '사입 필요' 알림은 끔
+            st = read_status()
+            st["short_seen"] = True
+            with open(STATUS, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+        self.hint.configure(text="사입 목록을 복사했습니다. 메신저 등에 붙여 넣으세요.")
 
     # ------------------------------------------------------------
     def stop(self):

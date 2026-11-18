@@ -461,13 +461,15 @@ def run_auto(force=False):
         done = send(cfg, rs, path, sheets, kind, prog, on_wait, stop=stop_requested)
         sent = done
         w = {"state": "ok", "issues": [], "note": ""} if op.is_test() else watch_print_job(cfg, path, sum(sheets), stage)
+        ded = _deduct(cfg, rs, done, stage)
         status(phase="완료" if w["state"] != "problem" else "확인 필요", final=True,
                result=w["state"], printer_issues=w["issues"], printer_note=w["note"], count=len(done),
-               sent=len(done), last=brief(rs[done[-1]]) if done else {})
+               sent=len(done), last=brief(rs[done[-1]]) if done else {}, deduct=ded)
     except AutoStopped:
         sent = [i for i in range(len(rs)) if str(rs[i].get("receipt_id")) in op.load_printed()]
+        ded = _deduct(cfg, rs, sent, stage)
         status(phase="중지됨", final=True, result="stopped", sent=len(sent), count=len(rs),
-               pages=None if not sent else load_status().get("pages"))
+               pages=None if not sent else load_status().get("pages"), deduct=ded)
         op.log.info(f"[자동 출력 중지] 보낸 {len(sent)}건 · 남은 {len(rs) - len(sent)}건은 다음 출력에")
     finally:
         try:
@@ -480,6 +482,27 @@ def run_auto(force=False):
         op.cleanup()
     except Exception as e:
         op.log.warning(f"정리 중 오류: {e}")
+
+
+def _deduct(cfg, rs, idx, stage):
+    """출력하면 재고 바로 차감 (관리 탭에서 켰을 때). 결과 창이 읽을 요약 (사입 목록 글자 포함)"""
+    import autodeduct as AD
+    if not idx or not AD.setting_on():
+        return None
+    try:
+        res = AD.run([rs[i] for i in idx], cfg, lambda p: stage(p))
+    except Exception as e:
+        op.log.exception("[자동 출력] 바로 차감 오류")
+        res = {"on": True, "err": f"재고 차감 중 오류: {str(e)[:150]} (줄은 차감 대기에 남음)"}
+    try:
+        import stock as S
+        res["short_text"] = "\n".join(S.short_line(it) for it in res.get("short") or [])
+        res["short_need"] = "\n".join(S.short_line(it, detail=False) for it in res.get("short") or [])
+    except Exception:
+        pass
+    res["summary"] = AD.summary_line(res)
+    res["problems"] = AD.problems(res)
+    return res
 
 
 def run_boot():
