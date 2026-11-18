@@ -128,20 +128,27 @@ def merge_all(res):
     st = PM.load_state()
     items = st.setdefault("items", {})
     added = 0
+    ws = load_state()
+    new_manual = ws.setdefault("new_manual", {})
     for lid, (e, st_, why) in res["new"].items():
         if lid in m:
             continue
         if e is not None:
+            e["new_check"] = now_s()                     # 새로 올라와 자동 연결된 상품 → 사람이 [확인함] 누를 때까지 알림
             m[lid] = e
             added += 1
+        if e is None or st_ != "done":
+            new_manual[lid] = {"title": res["listings"].get(lid, {}).get("title", ""), "time": now_s(), "why": why}
         items[lid] = {"status": st_, "why": why, "time": now_s()}
     S.save_map(m)
     PM.save_state(st)
+    save_state(ws)
     note = (f"Etsy {res['etsy']:,}개 · 카페24 {res['c24']:,}개 확인 — 바뀐 상품 {flagged}개 새로 찾음"
             + (f", 새 Etsy 상품 {len(res['new'])}개 (연결 {added}개)" if res["new"] else ""))
     s = load_state()
     s.update({"last": now_s(), "last_ok": now_s(), "note": note, "flagged": flagged})
     save_state(s)
+    _ALERT["key"] = None
     op.log.info(f"[바뀐 상품 확인] {note}")
     return flagged, len(res["new"]), note
 
@@ -201,6 +208,101 @@ def confirm(lid):
     e["ok_titles"] = sorted(ok)[-20:]
     S.save_map(m)
     op.log.info(f"[바뀐 상품 확인] {lid} 그대로 맞음")
+
+
+# ---------------------------------------------------------------- 연결 확인 알림 (출력 탭 띠·지금 출력 경고·자동 출력 결과 창)
+_ALERT = {"key": None, "val": None}
+CAT_TEXT = (("name", "상품명 변경"), ("option", "옵션 변경"), ("missing", "카페24 상품 없어짐"), ("new", "새 상품"),
+            ("code", "코드 다름"))
+
+
+def _cat_of(change_what):
+    if change_what in ("Etsy 상품명", "카페24 상품명"):
+        return "name"
+    if change_what in ("Etsy 옵션", "카페24 품목"):
+        return "option"
+    if change_what == "카페24 상품":
+        return "missing"
+    return "name"
+
+
+def alert_summary(force=False):
+    """연결 확인이 필요한 것 → {name, option, missing, new, code, total, lids: {listing_id: 종류}, last}
+    (연결표 파일이 바뀌었을 때만 다시 계산)"""
+    try:
+        key = (os.path.getmtime(S.MAP_PATH), os.path.getmtime(STATE_PATH) if os.path.exists(STATE_PATH) else 0,
+               os.path.getmtime(S.QUEUE_PATH) if os.path.exists(S.QUEUE_PATH) else 0)
+    except OSError:
+        key = None
+    if not force and key is not None and _ALERT["key"] == key:
+        return _ALERT["val"]
+    m = S.load_map()
+    excl = S.load_excluded()
+    out = {k: 0 for k, _t in CAT_TEXT}
+    lids = {}
+    for lid, e in m.items():
+        if lid in excl or not e.get("product_no"):
+            continue
+        if e.get("review"):
+            for c in e["review"].get("changes", []):
+                lids.setdefault(lid, _cat_of(c.get("what")))
+        elif e.get("new_check"):
+            lids[lid] = "new"
+        else:
+            try:
+                if S.code_mismatch(e):
+                    lids[lid] = "code"
+            except Exception:
+                pass
+    for x in S.load_queue():                              # 차감 대기 주문의 상품명이 연결할 때와 다름
+        if x.get("status") == "pending" and x["listing_id"] not in lids:
+            e = m.get(x["listing_id"])
+            if e and e.get("product_no") and S.title_mismatch(e, x["title"]):
+                lids[x["listing_id"]] = "name"
+    ws = load_state()
+    nm = ws.get("new_manual", {})
+    gone = [lid for lid in nm if lid in excl or (m.get(lid) or {}).get("product_no")]
+    if gone:                                              # 연결했거나 '연결 안 함'으로 뺀 새 상품은 목록에서 정리
+        for lid in gone:
+            nm.pop(lid, None)
+        save_state(ws)
+    for lid in nm:
+        lids.setdefault(lid, "new")
+    for k in lids.values():
+        out[k] += 1
+    out["total"] = len(lids)
+    out["lids"] = lids
+    out["last"] = ws.get("last_ok", "")
+    _ALERT.update(key=key, val=out)
+    return out
+
+
+def alert_text(a):
+    return " · ".join(f"{t} {a[k]}" for k, t in CAT_TEXT if a.get(k))
+
+
+def new_items():
+    """새 상품 목록: [(listing_id, 제목, 상태 '자동 연결됨'/'직접 연결 필요', 때)]"""
+    m = S.load_map()
+    out = []
+    for lid, e in m.items():
+        if e.get("new_check") and e.get("product_no"):
+            out.append((lid, e.get("etsy_title", lid), "자동 연결됨 — 맞는지 확인", e["new_check"]))
+    excl = S.load_excluded()
+    for lid, v in load_state().get("new_manual", {}).items():
+        if lid not in excl and not (m.get(lid) or {}).get("product_no"):
+            out.append((lid, v.get("title", lid), "직접 연결 필요", v.get("time", "")))
+    return sorted(out, key=lambda x: x[3], reverse=True)
+
+
+def confirm_new(lids):
+    """[확인함]: 자동 연결된 새 상품을 확인한 것으로"""
+    m = S.load_map()
+    for lid in lids:
+        if lid in m:
+            m[lid].pop("new_check", None)
+    S.save_map(m)
+    op.log.info(f"[새 상품] {len(lids)}개 확인함")
 
 
 # ---------------------------------------------------------------- 시간

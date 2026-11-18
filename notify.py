@@ -184,6 +184,9 @@ class Notice(tk.Tk):
         warn = []
         if st.get("stock_err"):
             warn.append(st["stock_err"] + " — 주문서에 '재고 확인 못 함'으로 표시")
+        if st.get("link"):
+            warn.append(f"연결 확인 필요 {st['link'].get('total')}개 — {st['link'].get('text', '')} "
+                        "(프로그램 재고 탭에서 확인 전까지 해당 상품은 차감 안 함)")
         if res == "none":
             self._dot(T.MUTED)
             self.title_lb.configure(text=f"{slot} 자동 출력 · 새 주문 없음{test}")

@@ -16,6 +16,7 @@ from gui_labels import LabelTab
 import gui_stock
 import autoprint as AP
 import autodeduct as AD
+import watch as W
 import gui_schedule
 import print_schedule as sch
 import updater as UP
@@ -224,6 +225,7 @@ class App(tk.Tk):
         self.update_test_ui()
         self.after(1500, self.refresh_auto)
         self.after(3000, self.check_update)              # 켜자마자 새 버전 확인 (깃허브)
+        self.after(2000, lambda: self.refresh_link_alert(schedule=True))   # 출력 탭 '연결 확인' 알림 (1분마다 갱신)
 
     def show_auto_short(self):
         st = AP.load_status() or {}
@@ -571,7 +573,95 @@ class App(tk.Tk):
         for key, text in self._alerts.items():
             if key == "conn_fail" and "conn" in self._alerts:
                 continue
+            if key == "link":                              # 연결 확인 알림: 누르면 재고 탭 연결표로
+                box = T.RoundBox(self.alert_fr, text=text, fill=T.ORANGE if "확인 중" not in text else "#8A8F98",
+                                 fg="white", under=T.BG)
+                box.configure(cursor="hand2")
+                box.bind("<Button-1>", lambda e: self.goto_link())
+                box.pack(fill="x", pady=(0, 6))
+                continue
             T.alert(self.alert_fr, text).pack(fill="x", pady=(0, 6))
+
+    # ================================================================ 연결 확인 알림 (출력 탭)
+    def refresh_link_alert(self, schedule=False):
+        try:
+            a = W.alert_summary()
+            watching = getattr(self.stock_tab, "_watching", False)
+            if a["total"]:
+                last = a.get("last", "")
+                self._alerts["link"] = (f"⚠ 연결 확인 필요 {a['total']}개 — {W.alert_text(a)}"
+                                        + (f"  (마지막 확인 {last[5:16]})" if last else "")
+                                        + ("  · 지금 다시 확인 중…" if watching else "")
+                                        + "\n누르면 재고 탭 연결표에서 확인합니다. 확인 전까지 해당 상품은 재고 차감에 반영되지 않습니다.")
+            elif watching:
+                self._alerts["link"] = "연결 확인 중… (Etsy·카페24 상품이 바뀌었는지, 새 상품이 있는지 보는 중)"
+            else:
+                self._alerts.pop("link", None)
+            self._render_alerts()
+        except Exception as e:
+            op.log.warning(f"[연결 확인 알림] {e}")
+        if schedule:
+            self.after(60_000, lambda: self.refresh_link_alert(schedule=True))
+
+    def goto_link(self):
+        a = W.alert_summary()
+        st = self.stock_tab
+        self.show_tab("stock")
+        try:
+            st.sub.select(2)
+            view = ("review" if (a.get("name") or a.get("option") or a.get("missing")) else
+                    "new" if a.get("new") else "code" if a.get("code") else "map")
+            st.mview.set(view)
+            st.fill_map()
+        except Exception as e:
+            op.log.warning(f"[연결 확인 알림] 이동 오류: {e}")
+
+    def _link_gate(self, rs):
+        """출력 전에 연결 확인이 필요한 것이 있으면 경고. 돌려줌: True = 출력 계속"""
+        a = W.alert_summary()
+        watching = getattr(self.stock_tab, "_watching", False)
+        if not a["total"] and not watching:
+            return True
+        lids = set(a.get("lids", {}))
+        hit = sum(1 for r in rs if any(str(t.get("listing_id")) in lids for t in r.get("transactions") or []))
+        msg = ("연결 확인을 해야하는 품목이 있습니다.\n"
+               "무시하고 출력하는 경우 재고 차감에 반영되지 않을 수 있습니다.\n"
+               "재고탭에서 연결확인을 먼저 해주세요.")
+        detail = []
+        if a["total"]:
+            detail.append("· " + W.alert_text(a))
+            detail.append(f"  (이번에 출력할 주문 중 해당: {hit}건)")
+        if watching:
+            detail.append("· 지금 Etsy·카페24 상품 변동을 확인하는 중입니다 (1~2분). 끝난 뒤 출력하면 더 정확합니다.")
+        res = {"v": "cancel"}
+        win = tk.Toplevel(self)
+        win.title("연결 확인 필요")
+        win.configure(background=T.CARD)
+        win.transient(self)
+        win.resizable(False, False)
+        body = tk.Frame(win, bg=T.CARD, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="⚠ " + msg, bg=T.CARD, fg=T.INK, font=T.f(11, True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(body, text="\n".join(detail), bg=T.CARD, fg=T.ORANGE, font=T.f(10), justify="left", anchor="w").pack(
+            anchor="w", pady=(10, 0))
+        bb = tk.Frame(body, bg=T.CARD)
+        bb.pack(fill="x", pady=(16, 0))
+
+        def pick(v):
+            res["v"] = v
+            win.destroy()
+        ttk.Button(bb, text="취소", command=lambda: pick("cancel")).pack(side="right")
+        ttk.Button(bb, text="무시하고 출력", style="Stop.TButton", command=lambda: pick("print")).pack(side="right", padx=6)
+        ttk.Button(bb, text="재고탭으로 가기", style="Accent.TButton", command=lambda: pick("go")).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", lambda: pick("cancel"))
+        gui_stock.center_on(win, 600, 260)
+        win.grab_set()
+        self.wait_window(win)
+        if res["v"] == "go":
+            self.goto_link()
+        elif res["v"] == "print":
+            op.log.info(f"[연결 확인] 경고 무시하고 출력 (확인 필요 {a['total']}개, 해당 주문 {hit}건)")
+        return res["v"] == "print"
 
     # ================================================================ 출력 탭
     def _build_print_tab(self):
@@ -1055,13 +1145,13 @@ class App(tk.Tk):
         if not rs:
             messagebox.showinfo("지금 출력", "새로 출력할 주문이 없습니다.")
             return
-        if self._confirm(rs, "새 주문"):
+        if self._link_gate(rs) and self._confirm(rs, "새 주문"):
             self._print(rs, "지금 출력")
 
     def print_group(self, name, rs):
         if self.busy or not rs:
             return
-        if self._confirm(rs, f"'{name}'"):
+        if self._link_gate(rs) and self._confirm(rs, f"'{name}'"):
             self._print(rs, name)
 
     def print_from(self):

@@ -428,7 +428,7 @@ def run_auto(force=False):
         _mark_done(today, due)
         return
     if not rs:
-        status(phase="새 주문 없음", count=0, final=True, result="none")
+        status(phase="새 주문 없음", count=0, final=True, result="none", link=_link_check(cfg, stage))
         _mark_done(today, due)
         return
 
@@ -462,9 +462,10 @@ def run_auto(force=False):
         sent = done
         w = {"state": "ok", "issues": [], "note": ""} if op.is_test() else watch_print_job(cfg, path, sum(sheets), stage)
         ded = _deduct(cfg, rs, done, stage)
+        link = _link_check(cfg, stage)
         status(phase="완료" if w["state"] != "problem" else "확인 필요", final=True,
                result=w["state"], printer_issues=w["issues"], printer_note=w["note"], count=len(done),
-               sent=len(done), last=brief(rs[done[-1]]) if done else {}, deduct=ded)
+               sent=len(done), last=brief(rs[done[-1]]) if done else {}, deduct=ded, link=link)
     except AutoStopped:
         sent = [i for i in range(len(rs)) if str(rs[i].get("receipt_id")) in op.load_printed()]
         ded = _deduct(cfg, rs, sent, stage)
@@ -482,6 +483,26 @@ def run_auto(force=False):
         op.cleanup()
     except Exception as e:
         op.log.warning(f"정리 중 오류: {e}")
+
+
+def _link_check(cfg, stage):
+    """연결 확인이 필요한 것 (바뀐 상품·새 상품·코드 다름). 마지막 확인이 2시간 넘게 지났으면 지금 확인하고 결과 창에 표시"""
+    try:
+        import cafe24 as C
+        import watch as W
+        last = W.load_state().get("last_ok", "")
+        try:
+            age = (dt.datetime.now() - dt.datetime.strptime(last, "%Y-%m-%d %H:%M:%S")).total_seconds() if last else 1e9
+        except ValueError:
+            age = 1e9
+        if age > 2 * 3600 and C.token_status()[0] != "bad":
+            stage("연결 확인 중 (바뀐 상품·새 상품)")
+            W.merge_all(W.check_all(op.EtsyClient(cfg), lambda *a, **k: None))
+        a = W.alert_summary(force=True)
+        return {"total": a["total"], "text": W.alert_text(a)} if a["total"] else None
+    except Exception as e:
+        op.log.warning(f"[자동 출력] 연결 확인 실패: {e}")
+        return None
 
 
 def _deduct(cfg, rs, idx, stage):

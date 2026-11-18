@@ -526,7 +526,11 @@ class StockTab(ttk.Frame):
                         command=self.fill_map).pack(side="left", padx=(12, 0))
         ttk.Radiobutton(fb, text="코드 다름", value="code", variable=self.mview,
                         command=self.fill_map).pack(side="left", padx=(12, 0))
-        help_icon(fb, "코드 다름: Etsy 상품 코드와 연결된 카페24 상품 코드가 다른 상품 (예: SI-172 ↔ SIL105). "
+        ttk.Radiobutton(fb, text="새 상품", value="new", variable=self.mview,
+                        command=self.fill_map).pack(side="left", padx=(12, 0))
+        help_icon(fb, "새 상품: '바뀐 상품 확인' 때 새로 찾은 Etsy 상품. 자동 연결된 것은 맞는지 보고 [확인함], "
+                      "'직접 연결 필요'는 두 번 눌러 연결하거나 [연결 안 함으로]. 처리하면 출력 탭 알림에서 빠집니다.\n\n"
+                      "코드 다름: Etsy 상품 코드와 연결된 카페24 상품 코드가 다른 상품 (예: SI-172 ↔ SIL105). "
                       "머리글자 대응표·숫자 앞 0·끝 글자(OR·GD)는 무시하고 비교합니다. 확인 전까지 그 상품은 차감하지 않습니다.\n\n"
                       "배수 확인: 옵션이 여러 개인데 배수가 2 이상인 상품 (예: 2 pcs + 옵션 2개는 옵션마다 1이 맞음).\n\n옵션 겹침: 한 상품 안에서 잘못 연결됐을 수 있는 옵션을 찾습니다.\n"
                       "① Etsy 같은 값이 다른 카페24 품목에 연결됨 (예: First Letter: A → A, Second Letter: A → B)\n"
@@ -598,6 +602,7 @@ class StockTab(ttk.Frame):
         hscroll_all(self)
         self.refresh()
         self.after(20_000, self._watch_tick)
+        self.after(5_000, self._startup_watch)          # 켜자마자 1번: 바뀐 상품·새 상품 확인 (출력 전에 알 수 있게)
 
     # ------------------------------------------------------------ 목록
     def _save_practice(self):
@@ -946,6 +951,10 @@ class StockTab(ttk.Frame):
 
     def after_connect(self):
         self.refresh()
+        try:
+            self.app.refresh_link_alert()
+        except Exception:
+            pass
         self.app.flash("연결을 저장했습니다. 같은 상품·옵션은 다음부터 자동으로 계산됩니다.")
 
     # ------------------------------------------------------------ 재고 불러오기·차감
@@ -1143,6 +1152,14 @@ class StockTab(ttk.Frame):
         self.app.bg(work, done, "차감 전 확인: Etsy·카페24 상품이 바뀌지 않았는지 보는 중...", progress=True)
 
     # ------------------------------------------------------------ 바뀐 상품 확인 (정해 둔 시간)
+    def _startup_watch(self):
+        try:
+            if not self._watching and not self.app.busy:
+                self.run_watch(manual=False)
+            self.app.refresh_link_alert()
+        except Exception as e:
+            op.log.warning(f"[바뀐 상품 확인] 시작 확인 오류: {e}")
+
     def _watch_tick(self):
         try:
             if not self._watching and not self.app.busy and W.due():
@@ -1188,6 +1205,10 @@ class StockTab(ttk.Frame):
                     messagebox.showinfo("바뀐 상품 확인", note + (f"\n\n확인이 필요한 상품: {total}개 (재고 탭 → 연결표 → 확인 필요)"
                                                            if total else "\n\n확인이 필요한 상품이 없습니다."))
             self.refresh()
+            try:
+                self.app.refresh_link_alert()
+            except Exception:
+                pass
             cb = getattr(self.app, "watch_admin_refresh", None)
             if cb:
                 cb()
@@ -1310,11 +1331,21 @@ class StockTab(ttk.Frame):
         n = 0
         m = S.load_map()
         self.mdetail.configure(text="")
-        if self.mview.get() in ("overlap", "code"):
+        if self.mview.get() in ("overlap", "code", "new"):
+            self.b_ovok.configure(text="확인함" if self.mview.get() == "new" else "이대로 맞음")
             self.b_ovok.pack(side="left", padx=6)
         else:
             self.b_ovok.pack_forget()
-        if self.mview.get() == "code":
+        if self.mview.get() == "new":
+            for lid, title, state, when in W.new_items():
+                if q and q not in title.lower():
+                    continue
+                e = m.get(lid, {})
+                self.mtree.insert("", "end", iid=lid, tags=("need",), values=(
+                    short_title(title, 60), short_title(e.get("product_name", ""), 40) or "-",
+                    "새 상품", self._nopt(e) if e else "-", f"{when[5:16]} 등록 · {state}"))
+                n += 1
+        elif self.mview.get() == "code":
             excl = S.load_excluded()
             for lid, e in m.items():
                 if lid in excl:
@@ -1437,6 +1468,21 @@ class StockTab(ttk.Frame):
 
     def overlap_ok_sel(self):
         sel = list(self.mtree.selection())
+        if self.mview.get() == "new":
+            m = S.load_map()
+            auto = [lid for lid in sel if (m.get(lid) or {}).get("product_no")]
+            if not auto:
+                messagebox.showinfo("새 상품", "자동 연결된 새 상품을 골라 주세요. '직접 연결 필요'인 상품은 두 번 눌러 연결하거나 "
+                                             "오른쪽 아래 [연결 안 함으로]를 누르면 목록에서 빠집니다.")
+                return
+            if not messagebox.askyesno("새 상품", f"고른 새 상품 {len(auto)}개의 연결을 확인했나요?\n\n"
+                                       "'예'를 누르면 알림에서 빠집니다 (연결이 틀렸으면 두 번 눌러 고치세요)."):
+                return
+            W.confirm_new(auto)
+            self.fill_map()
+            self.app.refresh_link_alert()
+            self.app.flash(f"새 상품 {len(auto)}개를 확인했습니다.")
+            return
         if self.mview.get() == "code":
             if not sel:
                 messagebox.showinfo("코드 다름", "맞게 연결된 상품을 골라 주세요 (Ctrl·Shift+클릭으로 여러 개).")
@@ -1447,6 +1493,7 @@ class StockTab(ttk.Frame):
             m = S.load_map()
             S.code_ok([(lid, m.get(lid, {}).get("etsy_title", "")) for lid in sel])
             self.fill_map()
+            self.app.refresh_link_alert()
             self.app.flash(f"{len(sel)}개를 '이대로 맞음'으로 표시했습니다.")
             return
         if not sel:
@@ -1630,6 +1677,11 @@ class ReviewDialog(tk.Toplevel):
         W.confirm(self.lid)
         self.destroy()
         self.tab.refresh()
+        try:
+            self.tab.fill_map()
+            self.tab.app.refresh_link_alert()
+        except Exception:
+            pass
         self.tab.app.flash("확인했습니다. 지금 모습을 새 기준으로 기억하고, 이 상품도 다시 차감합니다.")
 
     def edit(self):
@@ -2746,8 +2798,9 @@ class ConnectDialog(tk.Toplevel):
         e = self.entry if self.entry.get("product_no") == self.product["no"] else {}
         e.update({"product_no": self.product["no"], "product_name": self.product["name"], "mode": self.mode.get(),
                   "etsy_title": self.line["title"]})
-        # 사람이 확인하고 저장 → 지금 모습을 새 기준으로 (바뀐 상품 확인용)
+        # 사람이 확인하고 저장 → 지금 모습을 새 기준으로 (바뀐 상품 확인용), 새 상품 알림도 끝
         e.pop("review", None)
+        e.pop("new_check", None)
         if e.get("seen") and e["seen"].get("c24_name") == self.product["name"]:
             e["snap"] = dict(e["seen"])
         else:
