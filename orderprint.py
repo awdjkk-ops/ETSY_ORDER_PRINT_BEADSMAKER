@@ -309,6 +309,16 @@ def ts_to_date(ts):
 CURRENCY = {"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "KRW": "₩", "CAD": "CA$", "AUD": "A$"}
 
 
+def _amt(m):
+    """금액 숫자 (모르면 None)"""
+    if not m or m.get("amount") is None:
+        return None
+    return m["amount"] / (m.get("divisor") or 100)
+
+
+FEDEX_FROM = 20.0          # 배송비가 이 금액(달러) 이상이면 작업용 주문서에 'FEDEX 확인'
+
+
 def money(m):
     if not m or m.get("amount") is None:
         return ""
@@ -375,6 +385,7 @@ def normalize(receipt):
         "shipping_method": ", ".join(methods),
         "shipping_cost": money(receipt.get("total_shipping_cost")),
         "shipping_free": (receipt.get("total_shipping_cost") or {}).get("amount", 1) == 0,
+        "shipping_amt": _amt(receipt.get("total_shipping_cost")),
         "grandtotal": money(receipt.get("grandtotal")),
         "buyer_message": clean(receipt.get("message_from_buyer")),
         "is_gift": bool(receipt.get("is_gift")),
@@ -737,13 +748,20 @@ def draw_copy(c, x0, order, page_items, page_no, n_pages, shop, cfg, work, foote
         if work:
             c.line(LM, Y(top - 2), LM + LCW - 4, Y(top - 2))
             top += 13
-            top = draw_label_value(c, LM, top, "배송 국가", [f"{order['country_name']} ({order['country']})"],
+            import countries_ko
+            ko = countries_ko.name_ko(order["country"])
+            top = draw_label_value(c, LM, top, "배송 국가", [f"{order['country_name']} ({order['country']})"] + ([ko] if ko else []),
                                    value_size=9, value_bold=True) + 7
             if order["shipping_method"]:
                 top = draw_label_value(c, LM, top, "배송 방법", [order["shipping_method"]]) + 7
             cost = "무료배송" if order["shipping_free"] else order["shipping_cost"]
             if cost:
-                top = draw_label_value(c, LM, top, "배송비", [cost]) + 7
+                top = draw_label_value(c, LM, top, "배송비", [cost])
+                amt = order.get("shipping_amt")
+                if not order["shipping_free"] and amt is not None and amt >= FEDEX_FROM and top <= LAST_BOTTOM:
+                    text(c, LM, top, "FEDEX 확인", size=9, bold=True, color=INK)
+                    top += 11
+                top += 7
             if order["grandtotal"]:
                 top = draw_label_value(c, LM, top, "주문 금액", [order["grandtotal"]]) + 7
             if order["buyer_message"]:
