@@ -2,11 +2,13 @@
 """바뀐 상품 확인
 연결표의 상품마다 '연결할 때 모습(snap)'을 기억해 두고, Etsy·카페24의 지금 모습과 비교.
 상품명이 조금이라도 다르거나 옵션(품목)이 추가·삭제·변경되면 → '확인 필요'(review). 확인 전까지 그 상품은 차감 안 함.
-- 정해 둔 시간마다 전체 확인 (check_all) — Etsy 판매 중 상품 전체 + 카페24 연결 상품(새 Etsy 상품이 있으면 카페24 전체)
+- 정해 둔 시간마다 전체 확인 (check_all) — Etsy 판매 중 상품 전체 + 카페24 연결 상품 (출력과 상관없이 뒤에서)
+- 주문을 불러올 때 그 주문의 상품만 확인 (check_orders) — 몇 초. 새 상품은 그 자리에서 자동 연결 시도
 - 차감 직전에 그 주문의 상품만 확인 (check_some)
 무거운 받기(check_*)는 작업 쪽에서, 연결표에 쓰는 것(merge_*)은 화면 쪽에서 (연결 창 저장과 엇갈리지 않게)"""
 import datetime as dt
 import os
+import re
 
 import cafe24 as C
 import orderprint as op
@@ -112,7 +114,7 @@ def _c24_some(pnos, prog, stop):
 
 def check_all(client, prog, stop=None):
     """돌려줌: 화면 쪽 merge_all에 넘길 결과
-    카페24는 평소 연결표에 있는 상품만 받고, 새 Etsy 상품이 있을 때만 전체를 받음 (자동 연결 후보를 찾기 위해)"""
+    카페24는 연결표에 있는 상품만 받음. 새 Etsy 상품은 코드로 카페24 상품을 찾아 그 상품의 품목만 받아 연결"""
     import time
     t0 = time.time()
     times = []
@@ -130,13 +132,9 @@ def check_all(client, prog, stop=None):
     known = PM.load_state().get("items", {})
     excl = S.load_excluded()
     new_lids = [lid for lid in act if lid not in m and lid not in known and lid not in excl]
-    if new_lids:
-        allv, names_l = C.fetch_catalog(lambda d, t: prog(d, t, "카페24 전체 상품 (새 Etsy 상품 연결용)"), stop)
-        lap(f"카페24 전체 {len(names_l)}개")
-    else:
-        pnos = {e["product_no"] for lid, e in m.items() if lid in act and e.get("product_no")}
-        allv, names_l = _c24_some(pnos, prog, stop)
-        lap(f"카페24 연결 상품 {len(names_l)}개")
+    pnos = {e["product_no"] for lid, e in m.items() if lid in act and e.get("product_no")}
+    allv, names_l = _c24_some(pnos, prog, stop)
+    lap(f"카페24 연결 상품 {len(names_l)}개")
     names = {p["no"]: p["name"] for p in names_l}
     curs = {}
     for lid, e in m.items():
@@ -148,13 +146,14 @@ def check_all(client, prog, stop=None):
     listings = {lid: {**v, "options": opts.get(lid, [])} for lid, v in act.items()}
     units = S.load_units()
     new = {}
-    for lid in new_lids:
-        e, st_, why, _n = PM.connect_one(listings[lid], None, allv, units)
-        new[lid] = (e, st_, why)
-    lap("비교")
+    for n, lid in enumerate(new_lids, 1):              # 새 Etsy 상품: 코드로 카페24 상품을 찾아 그 상품 품목만 받음
+        if stop and stop.is_set():
+            break
+        prog(n, len(new_lids), "새 Etsy 상품 자동 연결")
+        new[lid] = _connect_new(listings[lid], allv, units)[:3]
+    lap(f"새 상품 {len(new_lids)}개 연결")
     op.log.info("[바뀐 상품 확인] 걸린 시간: " + " · ".join(times))
-    return {"curs": curs, "listings": listings, "new": new, "etsy": len(act), "c24": len(names_l),
-            "c24_all": bool(new_lids)}
+    return {"curs": curs, "listings": listings, "new": new, "etsy": len(act), "c24": len(names_l), "c24_all": False}
 
 
 def merge_all(res):
@@ -173,7 +172,7 @@ def merge_all(res):
             e["new_check"] = now_s()                     # 새로 올라와 자동 연결된 상품 → 사람이 [확인함] 누를 때까지 알림
             m[lid] = e
             added += 1
-        if e is None or st_ != "done":
+        if e is None or st_ != "ok":
             new_manual[lid] = {"title": res["listings"].get(lid, {}).get("title", ""), "time": now_s(), "why": why}
         items[lid] = {"status": st_, "why": why, "time": now_s()}
     S.save_map(m)
@@ -190,13 +189,13 @@ def merge_all(res):
 
 
 # ---------------------------------------------------------------- 차감 직전 확인 (그 주문의 상품만)
-def check_some(client, lids, prog=None):
+def check_some(client, lids, prog=None, label="차감 전 확인: Etsy 옵션"):
     m = S.load_map()
     lids = [str(x) for x in dict.fromkeys(lids) if (m.get(str(x)) or {}).get("product_no")]
     if not lids:
         return {}
     info = PM.etsy_by_ids(client, lids)
-    opts = PM.etsy_options(client, lids, prog, None, "차감 전 확인: Etsy 옵션")
+    opts = PM.etsy_options(client, lids, prog, None, label)
     pnos = {m[lid]["product_no"] for lid in lids}
     allv, names_l = C.fetch_catalog(product_nos=pnos)
     names = {p["no"]: p["name"] for p in names_l}
@@ -208,6 +207,163 @@ def check_some(client, lids, prog=None):
         if not names:
             curs[lid]["c24_missing"] = False             # 카페24를 못 받았으면 '없어짐'으로 보지 않음
     return curs
+
+
+# ---------------------------------------------------------------- 주문 상품만 확인 (주문을 불러올 때 · 자동 출력 전)
+def order_lines(receipts):
+    """주문 → 차감 대기와 같은 모양의 줄 (아직 대기에 안 넣은 주문도 계산할 수 있게)"""
+    out = []
+    for r in receipts or []:
+        for t in r.get("transactions", []) or []:
+            out.append({"tid": str(t.get("transaction_id") or ""), "receipt_id": str(r.get("receipt_id")),
+                        "listing_id": str(t.get("listing_id") or ""), "title": op.clean(t.get("title")),
+                        "quantity": int(t.get("quantity") or 1),
+                        "variations": [{"name": op.clean(v.get("formatted_name")), "value": op.clean(v.get("formatted_value"))}
+                                       for v in (t.get("variations") or []) if op.clean(v.get("formatted_value"))]})
+    return out
+
+
+def _ensure_candidates(title):
+    """저장된 카페24 상품 목록에서 코드로 못 찾으면, 카페24에서 그 코드(번호)로 검색해 목록에 더함
+    (카페24에 새로 등록한 상품도 자동 연결할 수 있게)"""
+    exact, core, _near, _want = S.match_products(title)
+    if exact or core:
+        return
+    code = C.extract_code(title)
+    if not code:
+        return
+    nc = C.norm_code(code)
+    _p, num = C.split_code(nc)
+    num = re.match(r"\d+", num or "")
+    keys = [code] + ([num.group(0).lstrip("0") or num.group(0)] if num else [])
+    found = {}
+    for k in dict.fromkeys(keys):
+        try:
+            for p in C.search_products(k):
+                found[p["no"]] = p
+        except Exception as e:
+            op.log.info(f"[자동 연결] 카페24 검색 실패 {k}: {e}")
+    if not found:
+        return
+    d = C.load_products()
+    have = {p["no"] for p in d.get("products", [])}
+    add = [p for no, p in found.items() if no not in have]
+    if add:
+        d["products"] = sorted(d.get("products", []) + add, key=lambda p: p["no"])
+        op.write_json(C.PRODUCTS_PATH, d)
+        op.log.info(f"[자동 연결] 카페24 상품 {len(add)}개를 상품 목록에 더함 (코드 {code})")
+
+
+def _connect_new(L, allv, units, search=False):
+    """새 Etsy 상품 하나 자동 연결 시도 → (연결표 항목 또는 None, 상태, 이유, 제목)"""
+    if search:
+        _ensure_candidates(L["title"])
+    try:
+        e, st_, why, _n = PM.connect_one(L, None, allv, units)
+    except Exception as ex:
+        op.log.warning(f"[자동 연결] 실패 {L.get('title', '')[:40]}: {ex}")
+        e, st_, why = None, "skip", f"자동 연결 중 오류: {str(ex)[:150]}"
+    return e, st_, why, L["title"]
+
+
+def check_orders(client, receipts, prog=None):
+    """작업 쪽: 이번 주문에 들어 있는 상품만 확인 (Etsy·카페24 100개씩 → 몇 초)
+    - 연결된 상품: 연결할 때와 같은지 (바뀌면 '확인 필요')
+    - 연결 안 된 새 상품: 코드로 카페24 상품을 찾아 자동 연결 시도 (안 되면 재고 탭에서 직접 연결)"""
+    import time
+    t0 = time.time()
+    prog = prog or (lambda *a, **k: None)
+    lines = order_lines(receipts)
+    m = S.load_map()
+    excl = S.load_excluded()
+    lids = sorted({x["listing_id"] for x in lines if x["listing_id"] and x["listing_id"] not in excl})
+    mapped = [lid for lid in lids if (m.get(lid) or {}).get("product_no")]
+    newl = [lid for lid in lids if lid not in mapped]
+    prog(0, len(lids), "주문 상품")
+    curs = check_some(client, mapped, prog, "주문 상품 Etsy 옵션") if mapped else {}
+    new = {}
+    if newl:
+        info, opts = {}, {}
+        try:
+            info = PM.etsy_by_ids(client, newl)
+            opts = PM.etsy_options(client, newl)
+        except Exception as e:
+            op.log.info(f"[주문 상품 확인] 새 상품 Etsy 정보 못 받음 (주문 옵션으로 연결): {e}")
+        units = S.load_units()
+        for n, lid in enumerate(newl, 1):
+            prog(n, len(newl), "새 상품 자동 연결")
+            ls = [x for x in lines if x["listing_id"] == lid]
+            o = opts.get(lid)
+            if not o:                                        # Etsy 옵션을 못 받았으면 주문에 적힌 옵션으로
+                d = {}
+                for x in ls:
+                    for v in x["variations"]:
+                        d.setdefault(v["name"], [])
+                        if v["value"] not in d[v["name"]]:
+                            d[v["name"]].append(v["value"])
+                o = [[k, v] for k, v in d.items()]
+            L = {"title": (info.get(lid) or {}).get("title") or ls[0]["title"], "options": o}
+            new[lid] = _connect_new(L, {}, units, search=True)
+    op.log.info(f"[주문 상품 확인] 상품 {len(lids)}개 (연결된 {len(mapped)} · 새 {len(newl)}) · {time.time() - t0:.0f}초")
+    return {"curs": curs, "new": new, "lids": lids}
+
+
+def merge_orders(res):
+    """화면 쪽: check_orders 결과를 연결표에 반영. 돌려줌: (바뀐 상품 수, 자동 연결한 새 상품 수, 직접 연결할 새 상품 수)"""
+    flagged = merge(res["curs"]) if res.get("curs") else 0
+    m = S.load_map()
+    pst = PM.load_state()
+    items = pst.setdefault("items", {})
+    ws = load_state()
+    nm = ws.setdefault("new_manual", {})
+    added = manual = 0
+    for lid, (e, st_, why, title) in (res.get("new") or {}).items():
+        if (m.get(lid) or {}).get("product_no"):
+            continue
+        if e is not None:
+            e["new_check"] = now_s()                         # 자동 연결된 새 상품 → [확인함] 누를 때까지 알림 (차감은 됨)
+            m[lid] = e
+        if e is not None and st_ == "ok":
+            added += 1
+        else:
+            manual += 1
+            nm[lid] = {"title": title, "time": now_s(), "why": why}
+        items[lid] = {"status": st_, "why": why, "time": now_s()}
+    if res.get("new"):
+        S.save_map(m)
+        PM.save_state(pst)
+    ws["order_check"] = now_s()
+    save_state(ws)
+    _ALERT["key"] = None
+    if flagged or added or manual:
+        op.log.info(f"[주문 상품 확인] 바뀐 상품 {flagged} · 새 상품 자동 연결 {added} · 직접 연결 필요 {manual}")
+    return flagged, added, manual
+
+
+ISSUE_TEXT = {"상품 연결 필요": "연결 필요", "옵션 연결 필요": "옵션 연결 필요", "품목 연결 필요": "옵션 연결 필요",
+              "확인 필요": "바뀐 상품 확인", "코드 다름": "코드 다름"}
+
+
+def order_issues(receipts):
+    """이번 주문 줄 중 재고 차감에 반영되지 않을 것 → {종류: 줄 수} ('연결 안 함'으로 뺀 상품은 제외)"""
+    m = S.load_map()
+    excl = S.load_excluded()
+    out = {}
+    for x in order_lines(receipts):
+        if not x["listing_id"] or x["listing_id"] in excl:
+            continue
+        try:
+            _d, why = S.resolve(x, m)
+        except Exception:
+            continue
+        if why:
+            k = ISSUE_TEXT.get(why, why)
+            out[k] = out.get(k, 0) + 1
+    return out
+
+
+def issues_text(iss):
+    return " · ".join(f"{k} {n}줄" for k, n in iss.items())
 
 
 # ---------------------------------------------------------------- 확인 처리
@@ -361,18 +517,6 @@ def parse_times(text):
 def load_times():
     t = op.load_settings().get("watch_times")
     return parse_times(",".join(t)) if isinstance(t, list) else list(DEFAULT_TIMES)
-
-
-RECENT_HOURS = 3
-
-
-def recent(hours=RECENT_HOURS):
-    """마지막 전체 확인이 hours시간 안에 끝났으면 True (프로그램을 켤 때 다시 확인하지 않음)"""
-    try:
-        t = dt.datetime.strptime(load_state().get("last_ok", ""), "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return False
-    return dt.datetime.now() - t < dt.timedelta(hours=hours)
 
 
 def due(now=None):

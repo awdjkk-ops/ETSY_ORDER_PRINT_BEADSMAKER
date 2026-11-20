@@ -428,7 +428,7 @@ def run_auto(force=False):
         _mark_done(today, due)
         return
     if not rs:
-        status(phase="새 주문 없음", count=0, final=True, result="none", link=_link_check(cfg, stage))
+        status(phase="새 주문 없음", count=0, final=True, result="none")
         _mark_done(today, due)
         return
 
@@ -446,6 +446,7 @@ def run_auto(force=False):
     sent = []
     try:
         check_stop()
+        _order_check(cfg, rs, lambda p: (check_stop(), stage(p)))
         path, sheets, note, stock_err, low = make_pdf(cfg, client, client.shop_name(), rs, "orders", prog,
                                                       lambda p: (check_stop(), stage(p)), stock_tries=STOCK_TRIES)
         status(stock_note=note, stock_err=stock_err, stock_low=low, pages=sum(sheets), pdf=path)
@@ -462,7 +463,7 @@ def run_auto(force=False):
         sent = done
         w = {"state": "ok", "issues": [], "note": ""} if op.is_test() else watch_print_job(cfg, path, sum(sheets), stage)
         ded = _deduct(cfg, rs, done, stage)
-        link = _link_check(cfg, stage)
+        link = _link_check(cfg, stage, [rs[i] for i in done])
         status(phase="완료" if w["state"] != "problem" else "확인 필요", final=True,
                result=w["state"], printer_issues=w["issues"], printer_note=w["note"], count=len(done),
                sent=len(done), last=brief(rs[done[-1]]) if done else {}, deduct=ded, link=link)
@@ -485,21 +486,30 @@ def run_auto(force=False):
         op.log.warning(f"정리 중 오류: {e}")
 
 
-def _link_check(cfg, stage):
-    """연결 확인이 필요한 것 (바뀐 상품·새 상품·코드 다름). 마지막 확인이 2시간 넘게 지났으면 지금 확인하고 결과 창에 표시"""
+def _order_check(cfg, rs, stage):
+    """출력 전: 이번 주문의 상품만 확인 (몇 초). 새 상품은 자동 연결 시도 → 바로 차감 때 반영"""
     try:
         import cafe24 as C
         import watch as W
-        last = W.load_state().get("last_ok", "")
-        try:
-            age = (dt.datetime.now() - dt.datetime.strptime(last, "%Y-%m-%d %H:%M:%S")).total_seconds() if last else 1e9
-        except ValueError:
-            age = 1e9
-        if age > 2 * 3600 and C.token_status()[0] != "bad":
-            stage("연결 확인 중 (바뀐 상품·새 상품)")
-            W.merge_all(W.check_all(op.EtsyClient(cfg), lambda *a, **k: None))
-        a = W.alert_summary(force=True)
-        return {"total": a["total"], "text": W.alert_text(a)} if a["total"] else None
+        if not rs or op.is_test() or C.token_status()[0] == "bad":
+            return
+        stage("주문 상품 확인 중 (새 상품 자동 연결)")
+        W.merge_orders(W.check_orders(op.EtsyClient(cfg), rs))
+    except AutoStopped:
+        raise
+    except Exception as e:
+        op.log.warning(f"[자동 출력] 주문 상품 확인 실패 (그대로 진행): {e}")
+
+
+def _link_check(cfg, stage, rs=None):
+    """결과 창용: 이번에 출력한 주문 중 재고 차감에 반영 안 되는 줄 (연결 필요·바뀐 상품·코드 다름)
+    상점 전체 확인은 하지 않음 (정해 둔 시간에 프로그램이 따로 함)"""
+    try:
+        import watch as W
+        iss = W.order_issues(rs or [])
+        if not iss:
+            return None
+        return {"total": sum(iss.values()), "text": "이번 주문 중 " + W.issues_text(iss)}
     except Exception as e:
         op.log.warning(f"[자동 출력] 연결 확인 실패: {e}")
         return None

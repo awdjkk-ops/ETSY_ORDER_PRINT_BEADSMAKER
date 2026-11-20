@@ -586,17 +586,17 @@ class App(tk.Tk):
     def refresh_link_alert(self, schedule=False):
         try:
             a = W.alert_summary()
-            watching = getattr(self.stock_tab, "_watching", False)
-            prog = getattr(self.stock_tab, "watch_prog", "") if watching else ""
+            checking = getattr(self.stock_tab, "_order_checking", False)      # 주문 상품 확인 (몇 초)
+            prog = getattr(self.stock_tab, "order_prog", "") if checking else ""
             if a["total"]:
                 last = a.get("last", "")
                 self._alerts["link"] = (f"⚠ 연결 확인 필요 {a['total']}개 — {W.alert_text(a)}"
-                                        + (f"  (마지막 확인 {last[5:16]})" if last else "")
-                                        + (f"  · 지금 다시 보는 중… {prog}" if watching else "")
+                                        + (f"  (마지막 전체 확인 {last[5:16]})" if last else "")
+                                        + (f"  · 주문 상품 확인 중… {prog}" if checking else "")
                                         + "\n누르면 재고 탭 연결표에서 확인합니다. 확인 전까지 해당 상품은 재고 차감에 반영되지 않습니다.")
-            elif watching:
-                self._alerts["link"] = (f"연결 확인 중… {prog or '시작하는 중'}\n"
-                                        "출력은 기다리지 않고 하셔도 됩니다. (Etsy·카페24 상품이 바뀌었는지, 새 상품이 있는지 보는 중)")
+            elif checking:
+                self._alerts["link"] = (f"연결 확인 중… 이번 주문 상품만 보는 중 {prog}\n"
+                                        "보통 몇 초면 끝납니다. (새 상품은 자동 연결을 시도합니다)")
             else:
                 self._alerts.pop("link", None)
             self._render_alerts()
@@ -620,21 +620,18 @@ class App(tk.Tk):
 
     def _link_gate(self, rs):
         """출력 전에 연결 확인이 필요한 것이 있으면 경고. 돌려줌: True = 출력 계속"""
-        a = W.alert_summary()
-        watching = getattr(self.stock_tab, "_watching", False)
-        if not a["total"] and not watching:
+        iss = W.order_issues(rs)                 # 이번에 출력할 주문 줄 중 재고 차감에 반영 안 될 것만
+        checking = getattr(self.stock_tab, "_order_checking", False)
+        if not iss and not checking:
             return True
-        lids = set(a.get("lids", {}))
-        hit = sum(1 for r in rs if any(str(t.get("listing_id")) in lids for t in r.get("transactions") or []))
         msg = ("연결 확인을 해야하는 품목이 있습니다.\n"
                "무시하고 출력하는 경우 재고 차감에 반영되지 않을 수 있습니다.\n"
                "재고탭에서 연결확인을 먼저 해주세요.")
         detail = []
-        if a["total"]:
-            detail.append("· " + W.alert_text(a))
-            detail.append(f"  (이번에 출력할 주문 중 해당: {hit}건)")
-        if watching:
-            detail.append("· 지금 Etsy·카페24 상품 변동을 확인하는 중입니다 (1~2분). 끝난 뒤 출력하면 더 정확합니다.")
+        if iss:
+            detail.append("· 이번에 출력할 주문 중: " + W.issues_text(iss))
+        if checking:
+            detail.append("· 지금 주문 상품을 확인하는 중입니다 (몇 초). 끝난 뒤 출력하면 더 정확합니다.")
         res = {"v": "cancel"}
         win = tk.Toplevel(self)
         win.title("연결 확인 필요")
@@ -662,7 +659,7 @@ class App(tk.Tk):
         if res["v"] == "go":
             self.goto_link()
         elif res["v"] == "print":
-            op.log.info(f"[연결 확인] 경고 무시하고 출력 (확인 필요 {a['total']}개, 해당 주문 {hit}건)")
+            op.log.info(f"[연결 확인] 경고 무시하고 출력 ({W.issues_text(iss) or '주문 상품 확인 중'})")
         return res["v"] == "print"
 
     # ================================================================ 출력 탭
@@ -877,6 +874,10 @@ class App(tk.Tk):
             self._alerts.pop("conn_fail", None)
             self.fill_board()
             self.refresh_status()
+            try:                                   # 출력 전: 아직 안 뽑은 주문의 상품만 확인 (몇 초)
+                self.stock_tab.run_order_check(self._todo())
+            except Exception as e:
+                op.log.warning(f"[주문 상품 확인] 시작 실패: {e}")
 
         def fail(e):
             self.new_title.configure(text="지금 새 주문  확인 실패")

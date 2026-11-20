@@ -600,10 +600,12 @@ class StockTab(ttk.Frame):
 
         self.buttons = [self.b_apply, self.b_undo, self.b_pm, self.b_pm_redo]
         self._watching = False
+        self._order_checking = False
+        self.order_prog = ""
         hscroll_all(self)
         self.refresh()
         self.after(20_000, self._watch_tick)
-        self.after(5_000, self._startup_watch)          # 켜자마자 1번: 바뀐 상품·새 상품 확인 (출력 전에 알 수 있게)
+        self.after(3_000, self._startup_watch)          # 켤 때: 알림만 (전체 확인은 정해 둔 시간에, 출력 전에는 주문 상품만)
 
     # ------------------------------------------------------------ 목록
     def _save_practice(self):
@@ -1154,15 +1156,61 @@ class StockTab(ttk.Frame):
 
     # ------------------------------------------------------------ 바뀐 상품 확인 (정해 둔 시간)
     def _startup_watch(self):
+        """켤 때는 상점 전체를 확인하지 않음 (주문을 불러오면 그 주문의 상품만 확인 — run_order_check)"""
         try:
-            if W.recent():
-                op.log.info(f"[바뀐 상품 확인] 켤 때 확인 건너뜀 — 마지막 확인 {W.load_state().get('last_ok', '')} "
-                            f"({W.RECENT_HOURS}시간 안)")
-            elif not self._watching and not self.app.busy:
-                self.run_watch(manual=False)
             self.app.refresh_link_alert()
         except Exception as e:
-            op.log.warning(f"[바뀐 상품 확인] 시작 확인 오류: {e}")
+            op.log.warning(f"[연결 확인 알림] {e}")
+
+    def run_order_check(self, receipts):
+        """주문을 불러온 뒤: 그 주문에 들어 있는 상품만 확인 (몇 초). 새 상품은 자동 연결 시도"""
+        if self._order_checking or not receipts or not self.app.cfg or op.is_test():
+            return
+        if C.token_status()[0] == "bad":
+            return
+        cfg = self.app.cfg
+        self._order_checking = True
+        self.order_prog = ""
+        last_ui = [0.0]
+
+        def show_prog(d, t, label=None):
+            self.order_prog = f"{label or ''} {d:,}/{t:,}" if t else (label or "")
+            now = time.time()
+            if now - last_ui[0] >= 1.0:
+                last_ui[0] = now
+                self.app.call(self.app.refresh_link_alert)
+
+        def work():
+            try:
+                return W.check_orders(op.EtsyClient(cfg), receipts, show_prog)
+            except Exception as e:
+                op.log.warning(f"[주문 상품 확인] 실패: {e}")
+                return {"__err__": str(e)}
+
+        def done(res):
+            self._order_checking = False
+            self.order_prog = ""
+            if "__err__" not in res:
+                try:
+                    flagged, added, manual = W.merge_orders(res)
+                    msg = []
+                    if added:
+                        msg.append(f"새 상품 {added}개 자동 연결")
+                    if manual:
+                        msg.append(f"새 상품 {manual}개는 재고 탭에서 직접 연결 필요")
+                    if flagged:
+                        msg.append(f"바뀐 상품 {flagged}개 확인 필요")
+                    if msg:
+                        self.app.flash("주문 상품 확인 — " + " · ".join(msg))
+                except Exception as e:
+                    op.log.warning(f"[주문 상품 확인] 반영 실패: {e}")
+                self.refresh()
+            try:
+                self.app.refresh_link_alert()
+            except Exception:
+                pass
+        self.app.call(self.app.refresh_link_alert)
+        self.app.bg(work, done, busy=False)
 
     def _watch_tick(self):
         try:
@@ -1184,14 +1232,9 @@ class StockTab(ttk.Frame):
         cfg = self.app.cfg
         self._watching = True
         self.watch_prog = ""
-        last_ui = [0.0]
 
-        def show_prog(d, t, label=None):              # 출력 탭 알림 칸에 단계·개수 (1.5초마다)
+        def show_prog(d, t, label=None):              # 전체 확인은 출력 탭에 띄우지 않음 (진행 글자만 보관)
             self.watch_prog = f"{label or ''} {d:,}/{t:,}" if t else (label or "")
-            now = time.time()
-            if now - last_ui[0] >= 1.5:
-                last_ui[0] = now
-                self.app.call(self.app.refresh_link_alert)
 
         def work(prog=None):
             def both(d, t, label=None):
@@ -3155,10 +3198,11 @@ def build_admin_cards(parent, app, row_start, width=560):
                        command=lambda: app.stock_tab.run_watch(manual=True) if hasattr(app, "stock_tab") else None)
     b_now.pack(side="left", padx=4)
     hint(wf, "여러 시간을 쉼표로 적습니다 (예: 09:00, 13:00, 17:00). 비우고 저장하면 자동 확인을 끕니다. "
-             "그 시간에 프로그램이 꺼져 있었으면 다음에 켤 때 바로 한 번 확인합니다. 확인은 뒤에서 조용히 하고(몇 분), "
-             "그동안 주문서 인쇄 등은 그대로 쓸 수 있습니다.\n"
+             "그 시간에 프로그램이 꺼져 있었으면 다음에 켤 때 한 번 확인합니다. 이 전체 확인은 출력과 상관없이 뒤에서 "
+             "조용히 하고, 그동안 주문서 인쇄 등은 그대로 쓸 수 있습니다.\n"
              "확인하는 것: 연결된 상품의 Etsy 상품명·옵션, 카페24 상품명·품목이 연결할 때와 조금이라도 다르면 '확인 필요' "
-             "(확인 전까지 차감 안 함). 새로 올라온 Etsy 상품은 확실한 것만 미리 연결해 둡니다. "
+             "(확인 전까지 차감 안 함). 새로 올라온 Etsy 상품은 확실한 것만 미리 연결해 둡니다.\n"
+             "출력 전에는 주문을 불러올 때 그 주문의 상품만 몇 초 동안 확인하고(새 상품은 자동 연결 시도, 안 되면 재고 탭에서 직접 연결), "
              "차감할 때마다 그 주문의 상품만 한 번 더 확인합니다.",
          row=2, column=0, columnspan=3, sticky="w", pady=(6, 0), wrap=width)
 
