@@ -574,7 +574,7 @@ class App(tk.Tk):
             if key == "conn_fail" and "conn" in self._alerts:
                 continue
             if key == "link":                              # 연결 확인 알림: 누르면 재고 탭 연결표로
-                box = T.RoundBox(self.alert_fr, text=text, fill=T.ORANGE if "확인 중" not in text else "#8A8F98",
+                box = T.RoundBox(self.alert_fr, text=text, fill=T.ORANGE if not text.startswith("연결 확인 중") else "#8A8F98",
                                  fg="white", under=T.BG)
                 box.configure(cursor="hand2")
                 box.bind("<Button-1>", lambda e: self.goto_link())
@@ -587,14 +587,16 @@ class App(tk.Tk):
         try:
             a = W.alert_summary()
             watching = getattr(self.stock_tab, "_watching", False)
+            prog = getattr(self.stock_tab, "watch_prog", "") if watching else ""
             if a["total"]:
                 last = a.get("last", "")
                 self._alerts["link"] = (f"⚠ 연결 확인 필요 {a['total']}개 — {W.alert_text(a)}"
                                         + (f"  (마지막 확인 {last[5:16]})" if last else "")
-                                        + ("  · 지금 다시 확인 중…" if watching else "")
+                                        + (f"  · 지금 다시 보는 중… {prog}" if watching else "")
                                         + "\n누르면 재고 탭 연결표에서 확인합니다. 확인 전까지 해당 상품은 재고 차감에 반영되지 않습니다.")
             elif watching:
-                self._alerts["link"] = "연결 확인 중… (Etsy·카페24 상품이 바뀌었는지, 새 상품이 있는지 보는 중)"
+                self._alerts["link"] = (f"연결 확인 중… {prog or '시작하는 중'}\n"
+                                        "출력은 기다리지 않고 하셔도 됩니다. (Etsy·카페24 상품이 바뀌었는지, 새 상품이 있는지 보는 중)")
             else:
                 self._alerts.pop("link", None)
             self._render_alerts()

@@ -2,7 +2,7 @@
 """바뀐 상품 확인
 연결표의 상품마다 '연결할 때 모습(snap)'을 기억해 두고, Etsy·카페24의 지금 모습과 비교.
 상품명이 조금이라도 다르거나 옵션(품목)이 추가·삭제·변경되면 → '확인 필요'(review). 확인 전까지 그 상품은 차감 안 함.
-- 정해 둔 시간마다 전체 확인 (check_all) — Etsy 판매 중 상품 전체 + 카페24 상품 전체(품목 포함)
+- 정해 둔 시간마다 전체 확인 (check_all) — Etsy 판매 중 상품 전체 + 카페24 연결 상품(새 Etsy 상품이 있으면 카페24 전체)
 - 차감 직전에 그 주문의 상품만 확인 (check_some)
 무거운 받기(check_*)는 작업 쪽에서, 연결표에 쓰는 것(merge_*)은 화면 쪽에서 (연결 창 저장과 엇갈리지 않게)"""
 import datetime as dt
@@ -96,29 +96,65 @@ def merge(curs):
 
 
 # ---------------------------------------------------------------- 전체 확인 (정해 둔 시간마다)
+def _c24_some(pnos, prog, stop):
+    """연결표에 있는 카페24 상품만 100개씩 받기 (진행 표시용으로 watch에서 나눠 받음)"""
+    nos = sorted({int(x) for x in pnos})
+    allv, names = {}, []
+    for i in range(0, len(nos), 100):
+        if stop and stop.is_set():
+            break
+        prog(min(i + 100, len(nos)), len(nos), "카페24 연결 상품")
+        a, n = C.fetch_catalog(product_nos=nos[i:i + 100])
+        allv.update(a)
+        names.extend(n)
+    return allv, names
+
+
 def check_all(client, prog, stop=None):
-    """돌려줌: 화면 쪽 merge_all에 넘길 결과"""
-    act = PM.etsy_active(client, lambda d, t, l=None: prog(d, t, "바뀐 상품 확인: Etsy 상품 목록"), stop)
-    opts = PM.etsy_options(client, list(act), prog, stop, "바뀐 상품 확인: Etsy 옵션")
-    allv, names_l = C.fetch_catalog(lambda d, t: prog(d, t, "바뀐 상품 확인: 카페24 상품"), stop)
-    names = {p["no"]: p["name"] for p in names_l}
+    """돌려줌: 화면 쪽 merge_all에 넘길 결과
+    카페24는 평소 연결표에 있는 상품만 받고, 새 Etsy 상품이 있을 때만 전체를 받음 (자동 연결 후보를 찾기 위해)"""
+    import time
+    t0 = time.time()
+    times = []
+
+    def lap(name):
+        nonlocal t0
+        times.append(f"{name} {time.time() - t0:.0f}초")
+        t0 = time.time()
+
+    act = PM.etsy_active(client, lambda d, t, l=None: prog(d, t, "Etsy 상품 목록"), stop)
+    lap(f"Etsy 상품 {len(act)}개")
+    opts = PM.etsy_options(client, list(act), prog, stop, "Etsy 옵션")
+    lap("Etsy 옵션")
     m = S.load_map()
+    known = PM.load_state().get("items", {})
+    excl = S.load_excluded()
+    new_lids = [lid for lid in act if lid not in m and lid not in known and lid not in excl]
+    if new_lids:
+        allv, names_l = C.fetch_catalog(lambda d, t: prog(d, t, "카페24 전체 상품 (새 Etsy 상품 연결용)"), stop)
+        lap(f"카페24 전체 {len(names_l)}개")
+    else:
+        pnos = {e["product_no"] for lid, e in m.items() if lid in act and e.get("product_no")}
+        allv, names_l = _c24_some(pnos, prog, stop)
+        lap(f"카페24 연결 상품 {len(names_l)}개")
+    names = {p["no"]: p["name"] for p in names_l}
     curs = {}
     for lid, e in m.items():
         if lid in act and e.get("product_no"):
             curs[lid] = make_cur(act[lid]["title"], opts.get(lid), e["product_no"], names, allv)
+            if not names:
+                curs[lid]["c24_missing"] = False         # 카페24를 못 받았으면 '없어짐'으로 보지 않음
     # 새로 올라온 Etsy 상품 → 확실한 것만 연결 제안
     listings = {lid: {**v, "options": opts.get(lid, [])} for lid, v in act.items()}
-    known = PM.load_state().get("items", {})
-    excl = S.load_excluded()
     units = S.load_units()
     new = {}
-    for lid, L in listings.items():
-        if lid in m or lid in known or lid in excl:
-            continue
-        e, st_, why, _n = PM.connect_one(L, None, allv, units)
+    for lid in new_lids:
+        e, st_, why, _n = PM.connect_one(listings[lid], None, allv, units)
         new[lid] = (e, st_, why)
-    return {"curs": curs, "listings": listings, "new": new, "etsy": len(act), "c24": len(names_l)}
+    lap("비교")
+    op.log.info("[바뀐 상품 확인] 걸린 시간: " + " · ".join(times))
+    return {"curs": curs, "listings": listings, "new": new, "etsy": len(act), "c24": len(names_l),
+            "c24_all": bool(new_lids)}
 
 
 def merge_all(res):
@@ -143,7 +179,7 @@ def merge_all(res):
     S.save_map(m)
     PM.save_state(st)
     save_state(ws)
-    note = (f"Etsy {res['etsy']:,}개 · 카페24 {res['c24']:,}개 확인 — 바뀐 상품 {flagged}개 새로 찾음"
+    note = (f"Etsy {res['etsy']:,}개 · 카페24 {'' if res.get('c24_all', True) else '연결 상품 '}{res['c24']:,}개 확인 — 바뀐 상품 {flagged}개 새로 찾음"
             + (f", 새 Etsy 상품 {len(res['new'])}개 (연결 {added}개)" if res["new"] else ""))
     s = load_state()
     s.update({"last": now_s(), "last_ok": now_s(), "note": note, "flagged": flagged})
@@ -325,6 +361,18 @@ def parse_times(text):
 def load_times():
     t = op.load_settings().get("watch_times")
     return parse_times(",".join(t)) if isinstance(t, list) else list(DEFAULT_TIMES)
+
+
+RECENT_HOURS = 3
+
+
+def recent(hours=RECENT_HOURS):
+    """마지막 전체 확인이 hours시간 안에 끝났으면 True (프로그램을 켤 때 다시 확인하지 않음)"""
+    try:
+        t = dt.datetime.strptime(load_state().get("last_ok", ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    return dt.datetime.now() - t < dt.timedelta(hours=hours)
 
 
 def due(now=None):

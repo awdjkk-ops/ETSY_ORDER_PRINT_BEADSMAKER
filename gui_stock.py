@@ -9,6 +9,7 @@ import datetime as dt
 import os
 import re
 import threading
+import time
 
 import backup as BK
 import cafe24 as C
@@ -1154,7 +1155,10 @@ class StockTab(ttk.Frame):
     # ------------------------------------------------------------ 바뀐 상품 확인 (정해 둔 시간)
     def _startup_watch(self):
         try:
-            if not self._watching and not self.app.busy:
+            if W.recent():
+                op.log.info(f"[바뀐 상품 확인] 켤 때 확인 건너뜀 — 마지막 확인 {W.load_state().get('last_ok', '')} "
+                            f"({W.RECENT_HOURS}시간 안)")
+            elif not self._watching and not self.app.busy:
                 self.run_watch(manual=False)
             self.app.refresh_link_alert()
         except Exception as e:
@@ -1179,16 +1183,30 @@ class StockTab(ttk.Frame):
             return
         cfg = self.app.cfg
         self._watching = True
+        self.watch_prog = ""
+        last_ui = [0.0]
+
+        def show_prog(d, t, label=None):              # 출력 탭 알림 칸에 단계·개수 (1.5초마다)
+            self.watch_prog = f"{label or ''} {d:,}/{t:,}" if t else (label or "")
+            now = time.time()
+            if now - last_ui[0] >= 1.5:
+                last_ui[0] = now
+                self.app.call(self.app.refresh_link_alert)
 
         def work(prog=None):
+            def both(d, t, label=None):
+                show_prog(d, t, label)
+                if prog:
+                    prog(d, t, label)
             try:
-                return W.check_all(op.EtsyClient(cfg), prog or (lambda *a, **k: None))
+                return W.check_all(op.EtsyClient(cfg), both)
             except Exception as e:
                 op.log.warning(f"[바뀐 상품 확인] 실패: {e}")
                 return {"__err__": str(e)}
 
         def done(res):
             self._watching = False
+            self.watch_prog = ""
             if "__err__" in res:
                 st = W.load_state()
                 st.update({"last": W.now_s(), "note": f"실패: {res['__err__'][:150]}"})
