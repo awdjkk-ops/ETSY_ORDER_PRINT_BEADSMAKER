@@ -242,21 +242,22 @@ def make_pdf(cfg, client, shop, rs, prefix, prog, stage, stock_tries=1):
 
 
 def send(cfg, rs, path, sheets, kind, prog, on_wait=None, stop=None):
-    """프린터로 보내고, 보낸 주문마다 '뽑음' 표시. 끝나면(중간에 멈춰도) 출력 기록·라벨 묶음·재고 차감 대기.
-    stop(): 묶음 사이에 확인 — True면 AutoStopped (지금 보내는 묶음까지는 나옴). 돌려줌: 보낸 주문 순번 목록"""
+    """프린터로 보내고(주문서 전체를 인쇄 작업 1개로), 다 보내면 보낸 주문마다 '뽑음' 표시.
+    끝나면 출력 기록·라벨 묶음·재고 차감 대기. stop(): 보내는 도중에도 확인 — True면 대기열에서 지우고 AutoStopped
+    (이미 프린터로 넘어간 몇 장은 나올 수 있음). 돌려줌: 보낸 주문 순번 목록"""
     done = []
 
     def on_batch(idx, bno, total):
         done.extend(idx)
         printed = op.load_printed() | {str(rs[i].get("receipt_id")) for i in idx}
         op.save_printed(printed)
-        prog(len(done), len(rs), f"프린터로 보냄 (묶음 {bno}/{total})")
-        if stop and bno < total and stop():
-            raise AutoStopped()
+        prog(len(done), len(rs), "프린터로 보냄")
 
     op.log.info(f"[{kind}] {len(rs)}건 · {sum(sheets)}장 인쇄 시작")
     try:
-        op.print_pdf(path, cfg, sheets, on_batch, on_wait)
+        op.print_pdf(path, cfg, sheets, on_batch, on_wait, stop=stop)
+    except op.PrintStopped:
+        raise AutoStopped()
     finally:
         op.add_history(kind, path, [rs[i] for i in done],
                        "" if len(done) == len(rs) else f"{len(rs) - len(done)}건 인쇄 못 함")
@@ -437,7 +438,7 @@ def run_auto(force=False):
     status(phase="주문서 만드는 중", count=len(rs), done=0, total=len(rs), first=brief(rs[0]), last=brief(rs[-1]))
 
     def prog(d, n, label=None):
-        if not (label or "").startswith("프린터로 보냄"):      # 보내는 중의 중지는 send()가 묶음 사이에서 처리
+        if not (label or "").startswith("프린터로 보냄"):      # 보내는 중의 중지는 print_pdf가 처리 (대기열에서 지움)
             check_stop()
         if label and (d % 5 == 0 or d == n):
             status(phase=label, done=d, total=n)
@@ -457,8 +458,6 @@ def run_auto(force=False):
             if sec % 5 == 0:
                 status(phase="프린터로 보내는 중", printer_progress=label,
                        printer_issues=["5분째 진행이 없어요 — 프린터를 확인하세요 (계속 기다리는 중)"] if slow else [])
-            if sec > 3600:
-                raise op.UserError("프린터로 보내는 데 1시간이 넘게 걸려 멈췄습니다. 프린터를 확인해 주세요.")
         done = send(cfg, rs, path, sheets, kind, prog, on_wait, stop=stop_requested)
         sent = done
         w = {"state": "ok", "issues": [], "note": ""} if op.is_test() else watch_print_job(cfg, path, sum(sheets), stage)

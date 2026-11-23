@@ -904,7 +904,7 @@ def build_pdf(orders, cfg, path, shop="", long_layout=None):
 
 # ---------------------------------------------------------------- 5. 인쇄
 SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
-SETTINGS_DEFAULT = {"printer": "", "batch_orders": 20, "long_order_layout": "continuous", "pdf_keep_days": 14, "image_keep_days": 60,
+SETTINGS_DEFAULT = {"printer": "", "long_order_layout": "continuous", "pdf_keep_days": 14, "image_keep_days": 60,
                     "label_keep_days": 30, "label_print_dialog": True,
                     "test_mode": False, "test_keep_days": 14,
                     "label_cal": {"offset_x": 0.0, "offset_y": 0.0, "scale_x": 0.0, "scale_y": 0.0}}
@@ -972,25 +972,101 @@ class PrintError(Exception):
         self.done_orders = done_orders
 
 
-STALL_WARN_SEC = 300   # 이 시간이 지나도 끝나지 않으면 '확인해 주세요' 알림 (강제로 끊지는 않음)
+STALL_WARN_SEC = 300   # 이 시간 동안 대기열에 한 장도 안 쌓이면 '확인해 주세요' 알림 (강제로 끊지는 않음)
+SPOOL_MAX_SEC = 3600   # 마지막 한계선: 1시간이 지나도 안 끝나면 멈추고 대기열에서 지움
+SPOOL_POLL_SEC = 15    # 인쇄 대기열을 보는 간격
 
 
-def _run_print(cmd, label, on_wait=None):
-    """인쇄 명령을 실행하고 끝날 때까지 기다림. 시간이 오래 걸려도 강제로 끊지 않고 알림만 보냄"""
+class PrintStopped(Exception):
+    """프린터로 보내는 도중 [멈춤] (이미 나온 장이 있을 수 있음)"""
+
+
+def _ps(cmd):
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + cmd],
+                       capture_output=True, timeout=30, creationflags=NO_WINDOW)
+    return r.stdout.decode("utf-8", "replace").strip()
+
+
+def spool_progress(printer, path):
+    """윈도우 인쇄 대기열에서 이 문서가 지금까지 쌓인 (장 수, 크기). 대기열에 없으면 (0, 0), 못 읽으면 None
+    (카페24 주문서 프로그램과 같은 방식)"""
+    if os.name != "nt" or not printer:
+        return None
+    name = printer.replace("'", "''")
+    stem = os.path.splitext(os.path.basename(path))[0].replace("'", "''")
+    try:
+        out = _ps(f"$j=@(Get-PrintJob -PrinterName '{name}' -ErrorAction Stop | "
+                  f"Where-Object {{ $_.DocumentName -like '*{stem}*' }}); "
+                  "if ($j.Count) { \"$($j[0].TotalPages)|$($j[0].Size)\" } else { 'none' }")
+    except Exception:
+        return None
+    if not out or "|" not in out:
+        return (0, 0) if out == "none" else None
+    a, b = out.split("|", 1)
+    try:
+        return int(a or 0), int(b or 0)
+    except ValueError:
+        return None
+
+
+def cancel_print_jobs(printer, path):
+    """윈도우 인쇄 대기열에서 이 주문서 인쇄를 지움 (이미 프린터로 넘어간 몇 장은 멈출 수 없음)"""
+    if os.name != "nt" or not printer:
+        return
+    name = printer.replace("'", "''")
+    stem = os.path.splitext(os.path.basename(path))[0].replace("'", "''")
+    try:
+        _ps(f"Get-PrintJob -PrinterName '{name}' -ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.DocumentName -like '*{stem}*' }} | Remove-PrintJob -ErrorAction SilentlyContinue")
+    except Exception as e:
+        log.warning(f"[인쇄] 대기열 지우기 실패: {e}")
+
+
+def _run_print(cmd, label, on_wait=None, printer=None, path=None, stop=None):
+    """인쇄 명령을 실행하고 끝날 때까지 기다림 (카페24 주문서 프로그램과 같은 방식).
+    - 대기열에 장이 쌓이는 동안은 끝까지 기다림. 5분 동안 한 장도 안 쌓이면 알림만 하고 계속 기다림
+    - stop()이 True면 멈추고 대기열에서 지움 → PrintStopped
+    - 1시간이 지나도 안 끝나면 멈추고 대기열에서 지움 → PrintError"""
     proc = subprocess.Popen(cmd, creationflags=NO_WINDOW)
-    start = time.time()
+    start = last_change = last_poll = time.time()
+    last, readable = None, False
     while proc.poll() is None:
         time.sleep(1)
+        now = time.time()
+        if stop and stop():
+            proc.kill()
+            if path:
+                cancel_print_jobs(printer, path)
+            log.info(f"[인쇄] 보내는 도중 멈춤: {os.path.basename(path or '')}")
+            raise PrintStopped()
+        if path and now - last_poll >= SPOOL_POLL_SEC:
+            last_poll = now
+            prog = spool_progress(printer, path)
+            if prog is not None:
+                readable = True
+                if prog != last:
+                    last, last_change = prog, now
+        if now - start >= SPOOL_MAX_SEC:
+            proc.kill()
+            if path:
+                cancel_print_jobs(printer, path)
+            raise PrintError(f"프린터로 보내기가 {SPOOL_MAX_SEC // 60}분 안에 끝나지 않아 멈췄습니다"
+                             + (f" ({last[0]}장까지 보냄)" if last else "") + ". 프린터 상태를 확인한 뒤 다시 뽑아 주세요.", [])
         if on_wait:
-            el = time.time() - start
-            on_wait(label, int(el), el > STALL_WARN_SEC)
+            el = now - start
+            slow = (now - last_change >= STALL_WARN_SEC) if readable else el > STALL_WARN_SEC
+            on_wait(label + (f" · 대기열에 {last[0]}장" if last and last[0] else ""), int(el), slow)
+    if path:
+        log.info(f"[인쇄] 프린터로 보내기 끝: {(time.time() - start) / 60:.1f}분" + (f", {last[0]}장" if last else ""))
     return proc.returncode
 
 
-def print_pdf(path, cfg, sheets=None, on_batch=None, on_wait=None):
-    """PDF를 인쇄. sheets(주문별 장수)를 주면 주문 N건씩 나눠서 보냄.
-    on_batch(끝난 주문 순번 목록, 묶음 번호, 전체 묶음 수): 묶음마다 끝나면 호출
-    on_wait(설명, 경과 초, 오래 걸림 여부): 기다리는 동안 1초마다 호출"""
+def print_pdf(path, cfg, sheets=None, on_batch=None, on_wait=None, stop=None):
+    """PDF를 인쇄. 주문서 전체를 인쇄 작업 1개로 보냄 (카페24 주문서 프로그램과 같은 방식 — 여러 작업을 연달아
+    보내면 프린터에서 빈 장·깨진 장이 나올 수 있어서). 보내는 동안 인쇄 대기열을 지켜봄.
+    on_batch(보낸 주문 순번 목록, 1, 1): 다 보낸 뒤 한 번 호출
+    on_wait(설명, 경과 초, 오래 걸림 여부): 기다리는 동안 1초마다 호출
+    stop(): True면 보내는 도중 멈추고 대기열에서 지움 (PrintStopped)"""
     printer = printer_name(cfg)
     n_orders = len(sheets) if sheets else 0
     if is_test():                      # 테스트 모드: 프린터로 보내지 않고 화면에 열기만
@@ -1006,34 +1082,21 @@ def print_pdf(path, cfg, sheets=None, on_batch=None, on_wait=None):
         return
     sumatra = find_sumatra(cfg)
     if not sumatra:
-        # PDF 기본 프로그램으로 한 번에 인쇄 (나눠서 보내기 불가)
-        os.startfile(path, "print")
+        os.startfile(path, "print")    # PDF 기본 프로그램으로 인쇄
         if on_batch:
             on_batch(list(range(n_orders)), 1, 1)
         return
     target = ["-print-to", printer] if printer else ["-print-to-default"]
-    size = max(1, int(load_settings().get("batch_orders") or 20))
-    if not sheets:
-        rc = _run_print([sumatra] + target + ["-print-settings", "fit,simplex", "-silent", path], "프린터로 보내는 중", on_wait)
-        if rc != 0:
-            raise PrintError(f"인쇄 프로그램이 오류를 알렸습니다 (코드 {rc}).", [])
-        return
-    batches, start_page = [], 1
-    for i in range(0, n_orders, size):
-        idx = list(range(i, min(i + size, n_orders)))
-        pages = sum(sheets[j] for j in idx)
-        batches.append((idx, start_page, start_page + pages - 1))
-        start_page += pages
-    done = []
-    for bno, (idx, p1, p2) in enumerate(batches, 1):
-        label = f"프린터로 보내는 중 · 묶음 {bno}/{len(batches)} ({p1}~{p2}장)"
-        rc = _run_print([sumatra] + target + ["-print-settings", f"{p1}-{p2},fit,simplex", "-silent", path], label, on_wait)
-        if rc != 0:
-            raise PrintError(f"묶음 {bno}/{len(batches)} 인쇄 중 인쇄 프로그램이 오류를 알렸습니다 (코드 {rc}).\n"
-                             f"앞의 {len(done)}건은 프린터로 보냈고, 나머지는 '다음에 출력'으로 남겨 두었습니다.", done)
-        done.extend(idx)
-        if on_batch:
-            on_batch(idx, bno, len(batches))
+    watch_name = printer or list_printers()[1]
+    pages = sum(sheets) if sheets else 0
+    label = f"프린터로 보내는 중 ({pages}장)" if pages else "프린터로 보내는 중"
+    rc = _run_print([sumatra] + target + ["-print-settings", "fit,simplex", "-silent", path], label, on_wait,
+                    printer=watch_name, path=path, stop=stop)
+    if rc != 0:
+        cancel_print_jobs(watch_name, path)
+        raise PrintError(f"인쇄 프로그램이 오류를 알렸습니다 (코드 {rc}). 이번 주문은 '다음에 출력'으로 남겨 두었습니다.", [])
+    if on_batch:
+        on_batch(list(range(n_orders)), 1, 1)
 
 
 def test_print(cfg):
@@ -1420,7 +1483,7 @@ def run(args):
         done.extend(idx)
         printed.update(str(receipts[i].get("receipt_id")) for i in idx)
         save_printed(printed)
-        log.info("묶음 %d/%d 프린터로 보냄 (%d건)", bno, total, len(idx))
+        log.info("프린터로 보냄 (%d건)", len(idx))
 
     last = [0]
 

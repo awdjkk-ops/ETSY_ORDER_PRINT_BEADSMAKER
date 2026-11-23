@@ -696,7 +696,7 @@ class App(tk.Tk):
         b2 = ttk.Button(brow, text="미리보기", command=self.preview_new, padding=(22, 10))
         b2.pack(side="left", padx=10)
         hint(af, "지금 출력: 아직 안 뽑은 주문을 모두 인쇄합니다. 인쇄 전에 한 번 확인하고, 출력한 주문은 기록되어 "
-                 "다시 나오지 않습니다. 주문이 많으면 나눠서 프린터로 보내고, 묶음이 끝날 때마다 기록합니다.\n"
+                 "다시 나오지 않습니다. 주문서 전체를 인쇄 작업 1개로 보내고, 다 보낸 뒤 기록합니다.\n"
                  "미리보기: 인쇄하지 않고 주문서를 화면(PDF)으로만 봅니다.",
              row=1, column=0, sticky="w", pady=(8, 0))
         lo = ttk.Frame(af)
@@ -1428,16 +1428,10 @@ class App(tk.Tk):
         hint(pf, "테스트 인쇄는 안내문 1장이 나오며, 주문 기록에는 영향이 없습니다.\n"
                  "SumatraPDF가 없으면 https://www.sumatrapdfreader.org 에서 받아 설치하세요(설치하면 자동으로 찾습니다).",
              row=3, column=0, columnspan=3, sticky="w", wrap=W)
-        bfr = ttk.Frame(pf)
-        bfr.grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(bfr, text="한 번에 프린터로 보낼 주문 수").pack(side="left")
-        self.batch_cb = ttk.Combobox(bfr, width=5, state="readonly", values=["10", "20", "30", "50"])
-        self.batch_cb.pack(side="left", padx=6)
-        self.batch_cb.bind("<<ComboboxSelected>>", lambda e: self._save_setting("batch_orders", int(self.batch_cb.get())))
-        ttk.Label(bfr, text="건").pack(side="left")
-        hint(pf, "주문이 많으면 이 수만큼씩 나눠서 보내고, 묶음이 끝날 때마다 '뽑음'으로 기록합니다. 시간이 오래 걸려도 인쇄를 강제로 "
-                 "끊지 않으며, 5분이 넘으면 위쪽 띠에 '프린터를 확인해 주세요'라고 알려줍니다.",
-             row=5, column=0, columnspan=3, sticky="w", pady=(4, 0), wrap=W)
+        hint(pf, "주문서는 카페24 주문서 프로그램과 같은 방식으로, 이번에 뽑는 주문 전체를 인쇄 작업 1개로 보냅니다. "
+                 "보내는 동안 인쇄 대기열을 지켜보고, 시간이 오래 걸려도 강제로 끊지 않으며, 5분 동안 진행이 없으면 위쪽 띠에 "
+                 "'프린터를 확인해 주세요'라고 알려줍니다. 다 보낸 뒤 '뽑음'으로 기록합니다.",
+             row=4, column=0, columnspan=3, sticky="w", pady=(8, 0), wrap=W)
 
         # 저장 공간
         sf = ttk.LabelFrame(right, text=" 저장 공간 ", padding=12)
@@ -1581,7 +1575,6 @@ class App(tk.Tk):
             self.sumatra_lb.configure(text="인쇄 프로그램(SumatraPDF): 설치됨" if sm else "인쇄 프로그램(SumatraPDF): 없음 — 설치가 필요합니다",
                                       foreground=T.GREEN if sm else T.ORANGE)
         s = op.load_settings()
-        self.batch_cb.set(str(s["batch_orders"]))
         self.pdf_keep.set(f"{s['pdf_keep_days']}일")
         self.img_keep.set(f"{s['image_keep_days']}일")
         self.lbl_keep.set(f"{s['label_keep_days']}일")

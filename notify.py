@@ -218,7 +218,8 @@ class Notice(tk.Tk):
                 self.body.configure(text=f"주문 {n}건 중 {sent}건은 프린터로 보내 '뽑음'으로 표시했습니다.\n"
                                          f"남은 {n - sent}건은 다음 출력에 나옵니다.")
             else:
-                self.body.configure(text="인쇄하기 전에 중지했습니다." + (f"\n이번 주문 {n}건은 다음 출력에 나옵니다." if n else ""))
+                self.body.configure(text="중지했습니다. 인쇄 대기열에서 이번 주문서를 지웠습니다." + (f"\n이번 주문 {n}건은 모두 다음 출력에 나옵니다." if n else "")
+                                    + "\n(중지 전에 프린터로 이미 넘어간 몇 장은 나왔을 수 있습니다)")
             self.hint.configure(text="바로 뽑으려면 [프로그램 열기] → 출력 탭 → 지금 출력.")
         elif res == "skipped":
             self._dot(T.ORANGE)
@@ -271,8 +272,8 @@ class Notice(tk.Tk):
         if self.stopping:
             return
         if not messagebox.askyesno("자동 출력 중지", "자동 출력을 중지할까요?\n\n"
-                                                 "프린터로 이미 보낸 묶음은 그대로 나오고 '뽑음'으로 남습니다.\n"
-                                                 "아직 안 보낸 주문은 다음 출력에 나옵니다.", parent=self):
+                                                 "인쇄 대기열에서 이번 주문서를 지우고, 이번 주문은 모두 다음 출력에 나옵니다.\n"
+                                                 "(프린터로 이미 넘어간 몇 장은 나올 수 있습니다)", parent=self):
             return
         self.stopping = True
         try:
@@ -281,7 +282,7 @@ class Notice(tk.Tk):
         except Exception:
             pass
         self.b_stop.state(["disabled"])
-        self.hint.configure(text="중지하는 중입니다... 지금 보내는 묶음이 끝나면 멈춥니다.")
+        self.hint.configure(text="중지하는 중입니다... (몇 초 안에 멈춥니다)")
 
     def ok(self):
         st = read_status()
